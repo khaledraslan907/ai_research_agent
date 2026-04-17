@@ -164,6 +164,48 @@ def _mask(key: str) -> str:
     return key[:4] + "•" * (len(key) - 8) + key[-4:]
 
 
+def _paper_attr(paper, *names: str) -> str:
+    for name in names:
+        try:
+            value = getattr(paper, name, "")
+        except Exception:
+            value = ""
+        if value is not None and str(value).strip() and str(value).strip().lower() != "nan":
+            return str(value)
+    return ""
+
+
+def _paper_rows_for_display(papers: list[CompanyRecord], source_rows: list[dict] | None = None) -> pd.DataFrame:
+    rows = []
+    source_rows = source_rows or []
+    for idx, paper in enumerate(papers):
+        src = source_rows[idx] if idx < len(source_rows) else {}
+        rows.append({
+            "Title": _paper_attr(paper, "company_name", "title"),
+            "Authors": _paper_attr(paper, "authors"),
+            "Year": _paper_attr(paper, "publication_year", "year"),
+            "DOI": _paper_attr(paper, "doi"),
+            "URL": _paper_attr(paper, "website", "source_url"),
+            "AI Summary": _paper_attr(paper, "notes"),
+            "Abstract": _paper_attr(paper, "description", "abstract", "summary"),
+            "Confidence": src.get("confidence_score", ""),
+            "Source Provider": src.get("source_provider", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def _file_bytes(path_str: str) -> bytes | None:
+    if not path_str:
+        return None
+    try:
+        path = Path(path_str)
+        if path.exists() and path.is_file():
+            return path.read_bytes()
+    except Exception:
+        return None
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Key guidance content
 # ──────────────────────────────────────────────────────────────────────────────
@@ -413,6 +455,13 @@ with st.sidebar:
             ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)", "JSON (.json)"],
         )
         export_filename = st.text_input("Export filename", value="results")
+        paper_summary_limit = st.slider("Paper summaries to generate", 1, 10, 5)
+        paper_synthesis_label = st.selectbox(
+            "Paper summary depth",
+            ["Literature review (faster)", "Deep research (slower)"],
+            index=0,
+        )
+        export_summary_pdf = st.checkbox("Create PDF research brief for paper searches", value=True)
 
         st.caption("**Fields to collect:**")
         col1, col2 = st.columns(2)
@@ -702,12 +751,60 @@ if run_btn and prompt.strip():
     if "Score" in df_display.columns:
         df_display = df_display.sort_values("Score", ascending=False)
 
+    # ── TABS + AUTO PAPER SUMMARY ───────────────────────────────────────────
+    is_papers = task_spec.task_type == "document_research"
+    paper_records: list[CompanyRecord] = []
+    paper_display_df = pd.DataFrame()
+    paper_export_paths: dict[str, str] = {}
+    paper_summary_report = ""
+    paper_summary_error = ""
+    paper_synthesis_mode = "deepresearch" if paper_synthesis_label.startswith("Deep") else "lit"
+
+    if is_papers:
+        paper_records = [CompanyRecord(**r) for r in result.get("records", [])]
+        try:
+            from core.feynman_bridge import auto_summarize_and_export, is_feynman_installed, get_feynman_version
+
+            if is_feynman_installed():
+                summary_status = st.empty()
+                with st.spinner("🔬 Preparing automatic paper summaries and PDF brief..."):
+                    def _paper_progress(msg: str):
+                        summary_status.caption(f"🔬 {msg}")
+
+                    paper_records, paper_summary_report, paper_export_paths = auto_summarize_and_export(
+                        papers=paper_records,
+                        topic=task_spec.industry or prompt,
+                        export_dir="outputs",
+                        export_pdf=export_summary_pdf,
+                        per_paper_limit=int(paper_summary_limit),
+                        synthesis_mode=paper_synthesis_mode,
+                        progress_callback=_paper_progress,
+                    )
+                summary_status.empty()
+                st.success(
+                    f"🧠 Paper summary ready · Feynman {get_feynman_version()} · "
+                    f"{min(len(paper_records), int(paper_summary_limit))} summaries generated"
+                )
+                if paper_export_paths.get("pdf_error"):
+                    st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
+            else:
+                paper_summary_error = (
+                    "Automatic paper summarization requires Feynman on the deployed machine. "
+                    "Paper results are still shown below."
+                )
+                st.warning(paper_summary_error)
+        except Exception as exc:
+            paper_summary_error = f"Automatic paper summarization failed: {exc}"
+            st.warning(paper_summary_error)
+
+        paper_display_df = _paper_rows_for_display(paper_records, result.get("records", []))
+
     # ── TABS ─────────────────────────────────────────────────────────────────
     if is_papers:
-        tab_results, tab_download, tab_feynman, tab_details = st.tabs([
+        tab_results, tab_summary, tab_download, tab_details = st.tabs([
             f"📊 Results ({total})",
+            "🧠 Summary",
             "⬇️ Download",
-            "🔬 Deep Research (Feynman)",
             "🔍 Search Details",
         ])
     else:
@@ -716,11 +813,10 @@ if run_btn and prompt.strip():
             "⬇️ Download",
             "🔍 Search Details",
         ])
-        tab_feynman = None
+        tab_summary = None
 
     # ── Results tab ────────────────────────────────────────────────────────────
     with tab_results:
-        # Cards view for people, table for others
         if is_people:
             st.markdown(f"**{total} LinkedIn profiles found**")
             for _, row in df_display.head(total).iterrows():
@@ -744,32 +840,44 @@ if run_btn and prompt.strip():
                 )
 
         elif is_papers:
-            st.markdown(f"**{total} papers found**")
-            for _, row in df_display.iterrows():
+            st.markdown(f"**{len(paper_records)} papers found**")
+            if paper_summary_error:
+                st.caption("Showing paper results without automatic summaries.")
+
+            for _, row in paper_display_df.iterrows():
                 title   = row.get("Title", "")
                 authors = row.get("Authors", "")
                 year    = row.get("Year", "")
                 doi     = row.get("DOI", "")
                 url     = row.get("URL", "")
-                abstract = str(row.get("Abstract", ""))[:250]
+                summary = str(row.get("AI Summary", "") or "")[:420]
+                abstract = str(row.get("Abstract", "") or "")[:220]
 
                 meta_parts = [p for p in [str(authors)[:80], str(year)] if p and p != "nan"]
                 meta = " · ".join(meta_parts)
                 link_ref = doi or url or ""
                 link_html = f'<a href="{link_ref}" target="_blank" class="result-link">🔗 View Paper</a>' if link_ref else ""
+                summary_html = (
+                    f'<div style="font-size:13px;color:#d7d9e2;margin:8px 0"><strong>AI Summary:</strong> {summary}{"..." if len(summary) == 420 else ""}</div>'
+                    if summary else ""
+                )
+                abstract_html = (
+                    f'<div style="font-size:12px;color:#5a6080;margin:6px 0">{abstract}{"..." if len(abstract) == 220 else ""}</div>'
+                    if abstract else ""
+                )
 
                 st.markdown(
                     f'<div class="result-card">'
                     f'<div class="result-name">📄 {title}</div>'
                     f'<div class="result-meta">{meta}</div>'
-                    f'<div style="font-size:12px;color:#5a6080;margin:6px 0">{abstract}{"..." if len(abstract) == 250 else ""}</div>'
+                    f'{summary_html}'
+                    f'{abstract_html}'
                     f'{link_html}'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
 
         else:
-            # Company table
             st.dataframe(
                 df_display,
                 use_container_width=True,
@@ -782,18 +890,44 @@ if run_btn and prompt.strip():
                 },
             )
 
+    if tab_summary is not None:
+        with tab_summary:
+            st.markdown("### 🧠 Automatic paper summary")
+            if paper_summary_error:
+                st.warning(paper_summary_error)
+            else:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Papers found", len(paper_records))
+                c2.metric("Summaries created", min(len(paper_records), int(paper_summary_limit)))
+                c3.metric("PDF ready", "Yes" if paper_export_paths.get("pdf") else "No")
+
+                if paper_summary_report:
+                    st.markdown(paper_summary_report)
+                else:
+                    st.info("Per-paper summaries are ready in the Results tab.")
+
+                if not paper_display_df.empty:
+                    with st.expander("Paper summary table", expanded=False):
+                        st.dataframe(
+                            paper_display_df[[c for c in ["Title", "Authors", "Year", "AI Summary"] if c in paper_display_df.columns]],
+                            use_container_width=True,
+                            height=420,
+                        )
+
     # ── Download tab ───────────────────────────────────────────────────────────
     with tab_download:
         st.markdown("### ⬇️ Download your results")
         st.caption("Choose the format you want:")
 
-        dl_col1, dl_col2, dl_col3, dl_col4 = st.columns(4)
+        dl_col1, dl_col2, dl_col3, dl_col4, dl_col5 = st.columns(5)
 
-        # Excel
+        export_df = paper_display_df if is_papers and not paper_display_df.empty else df_display
+
         try:
-            import io, openpyxl
+            import io
+            import openpyxl  # noqa: F401
             xl_buf = io.BytesIO()
-            df_display.to_excel(xl_buf, index=False, engine="openpyxl")
+            export_df.to_excel(xl_buf, index=False, engine="openpyxl")
             xl_buf.seek(0)
             dl_col1.download_button(
                 "📊 Excel (.xlsx)",
@@ -805,154 +939,62 @@ if run_btn and prompt.strip():
         except Exception:
             dl_col1.caption("Excel export unavailable (openpyxl missing)")
 
-        # CSV
-        csv_data = df_display.to_csv(index=False).encode("utf-8")
         dl_col2.download_button(
             "📄 CSV (.csv)",
-            data=csv_data,
+            data=export_df.to_csv(index=False).encode("utf-8"),
             file_name=_normalize_filename(export_filename, "csv"),
             mime="text/csv",
             use_container_width=True,
         )
 
-        # JSON
-        json_data = df_display.to_json(orient="records", indent=2).encode("utf-8")
         dl_col3.download_button(
             "🔧 JSON (.json)",
-            data=json_data,
+            data=export_df.to_json(orient="records", indent=2).encode("utf-8"),
             file_name=_normalize_filename(export_filename, "json"),
             mime="application/json",
             use_container_width=True,
         )
 
-        # PDF (from agent export)
-        ep = result.get("export_path", "")
-        if ep and Path(ep).exists() and ep.endswith(".pdf"):
-            with open(ep, "rb") as pdf_f:
-                dl_col4.download_button(
-                    "📑 PDF",
-                    data=pdf_f,
-                    file_name=Path(ep).name,
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
+        md_bytes = _file_bytes(paper_export_paths.get("markdown", "")) if is_papers else None
+        if md_bytes:
+            dl_col4.download_button(
+                "📝 Summary (.md)",
+                data=md_bytes,
+                file_name=Path(paper_export_paths["markdown"]).name,
+                mime="text/markdown",
+                use_container_width=True,
+            )
+        elif not is_papers:
+            dl_col4.caption("Markdown summary only for paper searches")
+        else:
+            dl_col4.caption("Summary markdown not ready")
+
+        pdf_bytes = None
+        if is_papers:
+            pdf_bytes = _file_bytes(paper_export_paths.get("pdf", ""))
+        else:
+            ep = result.get("export_path", "")
+            if ep and Path(ep).exists() and ep.endswith(".pdf"):
+                pdf_bytes = Path(ep).read_bytes()
+        if pdf_bytes:
+            file_name = Path(paper_export_paths["pdf"]).name if is_papers and paper_export_paths.get("pdf") else _normalize_filename(export_filename, "pdf")
+            dl_col5.download_button(
+                "📑 PDF",
+                data=pdf_bytes,
+                file_name=file_name,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            dl_col5.caption("PDF not ready")
+
+        if is_papers and paper_export_paths.get("pdf_error"):
+            st.warning(f"PDF export note: {paper_export_paths['pdf_error']}")
 
         st.divider()
         st.markdown("**Preview of what you'll download:**")
-        st.dataframe(df_display.head(5), use_container_width=True)
-        st.caption(f"Showing first 5 of {len(df_display)} rows.")
-
-    # ── Feynman Deep Research tab (papers only) ──────────────────────────────
-    if tab_feynman is not None:
-        with tab_feynman:
-            from core.feynman_bridge import (
-                is_feynman_installed, get_feynman_version,
-                run_feynman_lit_review, run_feynman_deep_research,
-                run_feynman_review, run_feynman_audit,
-                papers_to_feynman_context, papers_to_doi_list,
-            )
-
-            st.markdown("### 🔬 Deep Research with Feynman")
-            st.caption(
-                "Feynman reads all papers you found, synthesises findings, "
-                "verifies citations, and writes a cited research brief. "
-                "It works on the papers your agent just found above."
-            )
-
-            _ok = is_feynman_installed()
-            if not _ok:
-                st.warning(
-                    "**Feynman is not installed.**\n\n"
-                    "**Windows (PowerShell as Administrator):**\n"
-                    "```powershell\nirm https://feynman.is/install.ps1 | iex\n```\n\n"
-                    "**macOS / Linux:**\n"
-                    "```bash\ncurl -fsSL https://feynman.is/install | bash\n```\n\n"
-                    "Then run `feynman setup` to configure your API key.  "
-                    "[Feynman docs →](https://www.feynman.is/docs/getting-started/installation)"
-                )
-            else:
-                st.success(f"✅ Feynman installed — version `{get_feynman_version()}`")
-
-            _papers = [
-                CompanyRecord(**r) for r in result.get("records", [])
-                if r.get("page_type") == "document" or r.get("doi") or r.get("authors")
-            ]
-            st.info(f"**{len(_papers)} papers** ready for deep analysis.")
-
-            with st.expander("📄 Preview papers being sent to Feynman", expanded=False):
-                st.code(
-                    papers_to_feynman_context(_papers, task_spec.industry or "topic", max_papers=8),
-                    language="text",
-                )
-
-            st.divider()
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("**📚 Literature Review** `feynman lit`")
-                st.caption("Consensus map + open questions. ~2–3 min.")
-                if st.button("Run Literature Review", key="u_feynman_lit", disabled=not _ok):
-                    with st.spinner("🔬 Running literature review..."):
-                        r2 = run_feynman_lit_review(task_spec.industry or "topic", _papers)
-                    if r2["success"]:
-                        st.success("Done")
-                        st.markdown(r2["output"])
-                        st.download_button("⬇️ Download", data=r2["output"],
-                            file_name="lit_review.md", mime="text/markdown")
-                    else:
-                        st.error(r2["error"])
-
-                st.markdown("**🧪 Peer Review** `feynman review`")
-                st.caption("Severity-graded critique + revision plan. ~2 min.")
-                if st.button("Run Peer Review", key="u_feynman_review", disabled=not _ok):
-                    with st.spinner("🔬 Simulating peer review..."):
-                        r2 = run_feynman_review(task_spec.industry or "topic", _papers)
-                    if r2["success"]:
-                        c = r2.get("severity_counts", {})
-                        st.success(f"Done — Critical:{c.get('critical',0)} Major:{c.get('major',0)} Minor:{c.get('minor',0)}")
-                        st.markdown(r2["output"])
-                    else:
-                        st.error(r2["error"])
-
-            with col2:
-                st.markdown("**🧠 Deep Research** `feynman deepresearch`")
-                st.caption("Full multi-agent: Researcher → Reviewer → Writer → Verifier. ~5–10 min.")
-                if st.button("Run Deep Research", key="u_feynman_deep", disabled=not _ok):
-                    with st.spinner("🧠 Multi-agent deep research running..."):
-                        r2 = run_feynman_deep_research(task_spec.industry or "topic", _papers)
-                    if r2["success"]:
-                        st.success("Done")
-                        st.markdown(r2["output"])
-                        st.download_button("⬇️ Download Brief", data=r2["output"],
-                            file_name=f"research_brief_{task_spec.industry or 'topic'}.md",
-                            mime="text/markdown")
-                    else:
-                        st.error(r2["error"])
-
-                st.markdown("**🔍 Claim Audit** `feynman audit`")
-                st.caption("Checks if paper code matches its claims. ~1 min/paper.")
-                if st.button("Audit Papers", key="u_feynman_audit", disabled=not _ok):
-                    prog = st.progress(0)
-                    audit_rows = []
-                    for idx, paper in enumerate(_papers[:10]):
-                        prog.progress((idx + 1) / min(len(_papers), 10))
-                        with st.spinner(f"Auditing {paper.company_name[:40]}..."):
-                            ar = run_feynman_audit(paper)
-                        audit_rows.append({
-                            "Title":  paper.company_name[:60],
-                            "Result": "⚠️ MISMATCH" if ar.get("is_mismatch") else ("✅ OK" if ar["success"] else "❓ N/A"),
-                        })
-                    prog.empty()
-                    st.dataframe(pd.DataFrame(audit_rows), use_container_width=True)
-
-            st.divider()
-            st.caption("Run these commands in your terminal for the same results:")
-            topic_safe = (task_spec.industry or "topic").replace('"', '')
-            doi_list = papers_to_doi_list(_papers)
-            cmd = f'feynman lit "{topic_safe}"\nfeynman deepresearch "{topic_safe}"'
-            if doi_list:
-                cmd += f"\nfeynman audit {doi_list[0]}"
-            st.code(cmd, language="bash")
+        st.dataframe(export_df.head(5), use_container_width=True)
+        st.caption(f"Showing first 5 of {len(export_df)} rows.")
 
     # ── Search details tab ────────────────────────────────────────────────────
     with tab_details:
