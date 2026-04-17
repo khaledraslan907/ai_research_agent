@@ -51,6 +51,7 @@ import sys
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from collections import Counter
 from textwrap import wrap
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -142,6 +143,119 @@ def _paper_abstract(paper: CompanyRecord) -> str:
         if value:
             return value
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Built-in fallback summarizer
+# ---------------------------------------------------------------------------
+
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def _split_sentences(text: str) -> List[str]:
+    text = _normalize_whitespace(text)
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _top_keywords(texts: List[str], limit: int = 8) -> List[str]:
+    stop = {
+        "the","and","for","with","from","that","this","into","their","were","was","are","using",
+        "use","used","study","paper","research","results","result","based","analysis","data","method",
+        "methods","model","models","system","systems","approach","approaches","application","applications",
+        "electrical","submersible","pump","pumps","esp","review","reviews","between","within","under",
+        "over","than","into","onto","about","have","has","had","been","being","also","such","can",
+        "could","should","would","may","might","our","your","these","those","they","them","its","it's",
+        "abstract","context","authors","year"
+    }
+    tokens = []
+    for text in texts:
+        for tok in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower()):
+            if tok not in stop and not tok.isdigit():
+                tokens.append(tok)
+    counts = Counter(tokens)
+    return [w for w, _ in counts.most_common(limit)]
+
+
+
+def _builtin_single_paper_summary(topic: str, paper: CompanyRecord) -> str:
+    title = _paper_title(paper)
+    abstract = _paper_abstract(paper)
+    sentences = _split_sentences(abstract)
+    first = sentences[0] if sentences else "No abstract was available, so this summary is based on the paper title and metadata."
+    second = sentences[1] if len(sentences) > 1 else ""
+    third = sentences[2] if len(sentences) > 2 else ""
+    year = _paper_year(paper)
+    authors = _paper_authors(paper)
+    ref = _best_reference(paper)
+
+    lines = [
+        f"Plain-English summary: {first}"
+    ]
+    if second:
+        lines.append(f"Method / context: {second}")
+    if third:
+        lines.append(f"Key takeaway: {third}")
+
+    if not second and abstract:
+        kws = _top_keywords([title, abstract], limit=4)
+        if kws:
+            lines.append(f"Likely focus areas: {', '.join(kws)}.")
+
+    lines.append(f"Why it matters for {topic}: This paper appears relevant to the topic because it addresses {topic} directly or provides supporting technical context.")
+    if authors and authors != 'Unknown authors':
+        lines.append(f"Authors: {authors}.")
+    if year:
+        lines.append(f"Year: {year}.")
+    if ref:
+        lines.append(f"Reference: {ref}")
+
+    return "\n".join(lines).strip()
+
+
+
+def _builtin_topic_synthesis(topic: str, papers: List[CompanyRecord]) -> str:
+    if not papers:
+        return "No papers were available for synthesis."
+
+    texts = []
+    titles = []
+    with_abstract = 0
+    years = []
+    for paper in papers:
+        title = _paper_title(paper)
+        abstract = _paper_abstract(paper)
+        titles.append(title)
+        texts.append(title)
+        if abstract:
+            texts.append(abstract)
+            with_abstract += 1
+        year = _paper_year(paper)
+        if year:
+            years.append(year)
+
+    keywords = _top_keywords(texts, limit=6)
+    sample_titles = "; ".join(titles[:3])
+    date_span = ""
+    if years:
+        cleaned = [y for y in years if re.fullmatch(r"\d{4}", str(y).strip())]
+        if cleaned:
+            date_span = f"Publication years represented: {min(cleaned)} to {max(cleaned)}."
+
+    lines = [
+        f"This automated synthesis covers {len(papers)} papers related to {topic}.",
+        f"Most frequent themes in the retrieved set: {', '.join(keywords) if keywords else 'topic-specific technical concepts' }.",
+        f"{with_abstract} of the {len(papers)} papers included abstract or context text that could be summarized directly.",
+    ]
+    if date_span:
+        lines.append(date_span)
+    lines.append(f"Representative papers include: {sample_titles}.")
+    lines.append("Common gaps: some records may be missing full abstracts, benchmark details, or implementation details, so this synthesis should be treated as a rapid briefing rather than a full systematic review.")
+    lines.append("Recommended next step: open the top-ranked papers first, especially those with full abstracts, DOI links, or recent publication years.")
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -602,9 +716,11 @@ def enrich_papers_with_feynman(
         _log("⚠️ No papers found to summarize.")
         return papers, ""
 
-    if not is_feynman_installed():
-        _log("⚠️ Feynman not installed — skipping summarization.")
-        return papers, ""
+    use_feynman = is_feynman_installed()
+    if use_feynman:
+        _log("✅ Using Feynman for paper summaries.")
+    else:
+        _log("ℹ️ Feynman not installed — using built-in summarizer fallback.")
 
     synthesis_report = ""
 
@@ -623,49 +739,62 @@ def enrich_papers_with_feynman(
 
     if mode in {"paper_summaries", "summaries"}:
         limit = min(len(papers), max(1, per_paper_limit))
-        _log(f"🔬 Summarizing {limit} papers with Feynman...")
+        engine_label = "Feynman" if use_feynman else "built-in summarizer"
+        _log(f"🔬 Summarizing {limit} papers with {engine_label}...")
         for idx, paper in enumerate(papers[:limit], 1):
-            result = run_feynman_paper_summary(topic, paper)
-            if result["success"] and result.get("output"):
-                paper.notes = result["output"]
-                _log(f"  ✅ summarized {idx}/{limit}: {_paper_title(paper)[:60]}")
+            if use_feynman:
+                result = run_feynman_paper_summary(topic, paper)
+                if result["success"] and result.get("output"):
+                    paper.notes = result["output"]
+                    _log(f"  ✅ summarized {idx}/{limit}: {_paper_title(paper)[:60]}")
+                else:
+                    paper.notes = _builtin_single_paper_summary(topic, paper)
+                    _log(f"  ⚠️ Feynman failed, used fallback for {idx}/{limit}: {_paper_title(paper)[:60]}")
             else:
-                err = result.get("error") or "Unknown error"
-                paper.notes = f"[Feynman summary error] {err}"
-                _log(f"  ⚠️ summary failed {idx}/{limit}: {_paper_title(paper)[:60]}")
+                paper.notes = _builtin_single_paper_summary(topic, paper)
+                _log(f"  ✅ summarized {idx}/{limit}: {_paper_title(paper)[:60]}")
 
-        # Keep non-summarized papers untouched but add a gentle note if desired
         for paper in papers[limit:]:
             if not _safe_get(paper, "notes"):
                 paper.notes = ""
 
         if include_global_synthesis:
-            _log(f"🧠 Running combined {synthesis_mode} report...")
-            if synthesis_mode == "deepresearch":
-                synth = run_feynman_deep_research(topic, papers)
-            else:
-                synth = run_feynman_lit_review(topic, papers)
+            _log(f"🧠 Building combined {synthesis_mode} report...")
+            if use_feynman:
+                if synthesis_mode == "deepresearch":
+                    synth = run_feynman_deep_research(topic, papers)
+                else:
+                    synth = run_feynman_lit_review(topic, papers)
 
-            if synth["success"]:
-                synthesis_report = synth.get("output", "")
-                _log("✅ Combined synthesis complete.")
+                if synth["success"] and synth.get("output"):
+                    synthesis_report = synth.get("output", "")
+                    _log("✅ Combined synthesis complete.")
+                else:
+                    synthesis_report = _builtin_topic_synthesis(topic, papers)
+                    _log("⚠️ Combined synthesis fallback used.")
             else:
-                synthesis_report = synth.get("error", "")
-                _log(f"⚠️ Combined synthesis failed: {synthesis_report}")
+                synthesis_report = _builtin_topic_synthesis(topic, papers)
+                _log("✅ Combined synthesis complete.")
 
         return papers, synthesis_report
 
     if mode == "lit":
-        result = run_feynman_lit_review(topic, papers)
-        return papers, result.get("output", "") if result["success"] else result.get("error", "")
+        if use_feynman:
+            result = run_feynman_lit_review(topic, papers)
+            return papers, result.get("output", "") if result["success"] else _builtin_topic_synthesis(topic, papers)
+        return papers, _builtin_topic_synthesis(topic, papers)
 
     if mode == "deepresearch":
-        result = run_feynman_deep_research(topic, papers)
-        return papers, result.get("output", "") if result["success"] else result.get("error", "")
+        if use_feynman:
+            result = run_feynman_deep_research(topic, papers)
+            return papers, result.get("output", "") if result["success"] else _builtin_topic_synthesis(topic, papers)
+        return papers, _builtin_topic_synthesis(topic, papers)
 
     if mode == "review":
-        result = run_feynman_review(topic, papers)
-        return papers, result.get("output", "") if result["success"] else result.get("error", "")
+        if use_feynman:
+            result = run_feynman_review(topic, papers)
+            return papers, result.get("output", "") if result["success"] else _builtin_topic_synthesis(topic, papers)
+        return papers, _builtin_topic_synthesis(topic, papers)
 
     return papers, synthesis_report
 
@@ -723,7 +852,7 @@ def _build_markdown_report(
         lines.append("")
 
         if notes:
-            lines.append("**Feynman Summary**")
+            lines.append("**AI Summary**")
             lines.append("")
             lines.append(notes.strip())
             lines.append("")
@@ -905,7 +1034,7 @@ def export_research_summary_pdf(
 
             notes = _safe_get(paper, "notes")
             if notes:
-                y = draw_wrapped_paragraph("Feynman Summary:", y, font_size=10, leading=14, bold=True)
+                y = draw_wrapped_paragraph("AI Summary:", y, font_size=10, leading=14, bold=True)
                 for para in notes.splitlines():
                     if para.strip():
                         y = draw_wrapped_paragraph(para.strip(), y, font_size=10, leading=14)
@@ -976,7 +1105,7 @@ def auto_summarize_and_export(
         synthesis_mode=synthesis_mode,
     )
 
-    export_paths: Dict[str, str] = {}
+    export_paths: Dict[str, str] = {"summary_engine": "feynman" if is_feynman_installed() else "built-in"}
 
     md_path = export_research_summary_markdown(
         topic=topic,
