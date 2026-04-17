@@ -1,100 +1,287 @@
+
 """
 feynman_bridge.py
 ==================
-Integration between the AI Research Agent and Feynman
-(https://feynman.is / https://github.com/getcompanion-ai/feynman).
+Automatic paper summarization + optional PDF export bridge between
+your AI Research Agent and Feynman.
 
-HOW THE TWO SYSTEMS COMPLEMENT EACH OTHER
-==========================================
+TARGET WORKFLOW
+===============
+1. Your agent finds papers.
+2. This bridge automatically summarizes the top papers one by one.
+3. It also produces a combined literature review / deep-research report.
+4. It can export the result package to Markdown or PDF.
 
-  Your Agent:                         Feynman:
-  ─────────────────────────────────   ───────────────────────────────────
-  Broad multi-source discovery        Deep single-topic synthesis
-  Geographic filtering                Claim verification against source
-  People / company search             Peer review simulation
-  Excel / PDF / CSV export            Literature review with consensus map
-  Free API chain (Groq/Gemini)        Multi-agent (Researcher/Reviewer/
-  25–150 papers found fast            Writer/Verifier)
-                                      AlphaXiv + web search
+NOTES
+=====
+- On Windows this bridge calls the standalone Feynman launcher directly:
+    %LOCALAPPDATA%\Programs\feynman\bin\feynman.cmd
+  This avoids PATH / local-Node issues.
+- For paper-by-paper summaries, the bridge uses `feynman chat "<prompt>"`.
+- For topic synthesis, it uses `feynman lit "<topic>"` or
+  `feynman deepresearch "<topic>"`.
+- For PDF export, it tries reportlab first. If reportlab is unavailable,
+  it falls back to writing Markdown and returns an informative error.
 
-INTEGRATION MODES
-=================
+RECOMMENDED APP FLOW
+====================
+After your search agent returns paper records, call:
 
-Mode 1 — "Discover then Deep-Dive" (recommended)
-  Your agent finds 20–100 papers on a topic (fast, broad).
-  User selects the most relevant ones.
-  Feynman runs /deepresearch or /lit on those titles.
-  Your agent exports the combined output to Excel/PDF.
+    enriched_papers, synthesis_report, export_paths = auto_summarize_and_export(
+        papers=found_papers,
+        topic=user_prompt,
+        export_dir="outputs",
+        export_pdf=True,
+        per_paper_limit=5,
+        synthesis_mode="lit",
+    )
 
-Mode 2 — "Feynman as a Research Provider"
-  Feynman's CLI is called as a subprocess for each paper found.
-  Its output (cited brief) is stored in the paper's description field.
-  Exported to PDF with full synthesis.
-
-Mode 3 — "Claim Verification Pass"
-  After your agent finds papers, run Feynman /audit on each DOI.
-  Flags papers where code doesn't match claimed results.
-  Adds a "verified" / "unverified" / "mismatch" column to export.
-
-INSTALLATION CHECK
-==================
-Run: feynman --version
-If not installed: curl -fsSL https://feynman.is/install | bash
-
-USAGE IN YOUR AGENT
-===================
-1. Run a document_research search as normal.
-2. In the results tab, click "🔬 Deep Research with Feynman".
-3. Choose: Literature Review / Deep Research / Claim Audit.
-4. Feynman runs in background; results appear in a new tab.
+You can then show:
+- each paper.notes  -> short paper summary
+- synthesis_report  -> combined topic report
+- export_paths      -> files written to disk
 """
 from __future__ import annotations
 
-import json
 import os
 import re
+import shutil
 import subprocess
 import sys
-import tempfile
+from datetime import datetime
+from html import escape
 from pathlib import Path
+from textwrap import wrap
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.models import CompanyRecord
 
 
 # ---------------------------------------------------------------------------
-# Feynman installation helpers
+# Small safety helpers
 # ---------------------------------------------------------------------------
 
+def _safe_get(obj: Any, attr: str, default: str = "") -> str:
+    """Safe getattr that always returns a string-like value or default."""
+    try:
+        value = getattr(obj, attr, default)
+        if value is None:
+            return default
+        return str(value)
+    except Exception:
+        return default
+
+
+def _truncate(text: str, n: int = 3000) -> str:
+    text = (text or "").strip()
+    if len(text) <= n:
+        return text
+    return text[: n - 3].rstrip() + "..."
+
+
+def _slugify(text: str, max_len: int = 80) -> str:
+    text = re.sub(r"[^\w\s-]", "", text or "").strip().lower()
+    text = re.sub(r"[-\s]+", "-", text)
+    return text[:max_len].strip("-") or "report"
+
+
+def _extract_doi(text: str) -> str:
+    if not text:
+        return ""
+    m = re.search(r"(10\.\d{4,9}/[-._;()/:A-Z0-9]+)", text, re.I)
+    return m.group(1).rstrip(").,;") if m else ""
+
+
+def _extract_arxiv_id(text: str) -> str:
+    if not text:
+        return ""
+    m = re.search(r"(?:arxiv:|arxiv\.org/(?:abs|pdf)/)(\d{4}\.\d{4,5})(?:v\d+)?", text, re.I)
+    return m.group(1) if m else ""
+
+
+def _best_reference(paper: CompanyRecord) -> str:
+    """Choose the best available machine-usable reference for a paper."""
+    website = _safe_get(paper, "website")
+    source_url = _safe_get(paper, "source_url")
+    doi = _safe_get(paper, "doi")
+
+    arxiv_id = _extract_arxiv_id(website) or _extract_arxiv_id(source_url) or _extract_arxiv_id(doi)
+    if arxiv_id:
+        return f"arxiv:{arxiv_id}"
+
+    doi_value = _extract_doi(doi) or _extract_doi(website) or _extract_doi(source_url)
+    if doi_value:
+        return f"https://doi.org/{doi_value}"
+
+    return website or source_url or doi
+
+
+def _paper_title(paper: CompanyRecord) -> str:
+    return (
+        _safe_get(paper, "company_name")
+        or _safe_get(paper, "title")
+        or "Untitled Paper"
+    )
+
+
+def _paper_authors(paper: CompanyRecord) -> str:
+    return _safe_get(paper, "authors", "Unknown authors")
+
+
+def _paper_year(paper: CompanyRecord) -> str:
+    for attr in ("publication_year", "year"):
+        value = _safe_get(paper, attr)
+        if value:
+            return value
+    return ""
+
+
+def _paper_abstract(paper: CompanyRecord) -> str:
+    for attr in ("description", "abstract", "summary"):
+        value = _safe_get(paper, attr)
+        if value:
+            return value
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Feynman executable helpers
+# ---------------------------------------------------------------------------
+
+def _get_feynman_executable() -> str:
+    """
+    Resolve the standalone Feynman launcher first.
+
+    On Windows we prefer:
+      %LOCALAPPDATA%\Programs\feynman\bin\feynman.cmd
+
+    This avoids PATH issues and avoids forcing local Node.
+    """
+    candidates: List[Optional[str]] = []
+
+    if sys.platform == "win32":
+        candidates.extend([
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\feynman\bin\feynman.cmd"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\feynman\bin\feynman.ps1"),
+            shutil.which("feynman.cmd"),
+            shutil.which("feynman"),
+        ])
+    else:
+        candidates.extend([
+            shutil.which("feynman"),
+            os.path.expanduser("~/.local/bin/feynman"),
+        ])
+
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(Path(candidate))
+    return ""
+
+
 def is_feynman_installed() -> bool:
-    """Return True if the `feynman` CLI is reachable on PATH."""
+    exe = _get_feynman_executable()
+    if not exe:
+        return False
     try:
         result = subprocess.run(
-            ["feynman", "--version"],
-            capture_output=True, text=True, timeout=10,
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=False,
         )
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except Exception:
         return False
 
 
 def get_feynman_version() -> str:
+    exe = _get_feynman_executable()
+    if not exe:
+        return "not installed"
     try:
-        r = subprocess.run(["feynman", "--version"], capture_output=True, text=True, timeout=10)
-        return r.stdout.strip() or r.stderr.strip() or "unknown"
+        result = subprocess.run(
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            shell=False,
+        )
+        return (result.stdout or result.stderr).strip() or "unknown"
     except Exception:
         return "not installed"
 
 
 def install_feynman_command() -> str:
-    """Return the shell command to install Feynman for the current platform."""
     if sys.platform == "win32":
         return "irm https://feynman.is/install.ps1 | iex"
     return "curl -fsSL https://feynman.is/install | bash"
 
 
 # ---------------------------------------------------------------------------
-# Build Feynman input from search results
+# Feynman subprocess runner
+# ---------------------------------------------------------------------------
+
+def _run_feynman_command(
+    args: List[str],
+    timeout: int = 300,
+    env: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Run Feynman without forcing a local Node runtime.
+
+    Important:
+    - We DO NOT set FEYNMAN_NODE.
+    - We call the standalone launcher directly.
+    """
+    exe = _get_feynman_executable()
+    if not exe:
+        return {
+            "success": False,
+            "output": "",
+            "error": f"Feynman not installed. Run: {install_feynman_command()}",
+            "command": "",
+            "returncode": -1,
+        }
+
+    normalized = args[1:] if args and args[0].lower() == "feynman" else args
+
+    try:
+        proc = subprocess.run(
+            [exe, *normalized],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, **(env or {})},
+            shell=False,
+        )
+        return {
+            "success": proc.returncode == 0,
+            "output": (proc.stdout or "").strip(),
+            "error": (proc.stderr or "").strip(),
+            "command": " ".join([Path(exe).name, *normalized[:3]]) + (" ..." if len(normalized) > 3 else ""),
+            "returncode": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "output": "",
+            "error": f"Feynman timed out after {timeout}s",
+            "command": " ".join(normalized[:3]) + (" ..." if len(normalized) > 3 else ""),
+            "returncode": -1,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "output": "",
+            "error": str(exc),
+            "command": " ".join(normalized[:3]) + (" ..." if len(normalized) > 3 else ""),
+            "returncode": -1,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Prompt / context builders
 # ---------------------------------------------------------------------------
 
 def papers_to_feynman_context(
@@ -103,135 +290,236 @@ def papers_to_feynman_context(
     max_papers: int = 20,
 ) -> str:
     """
-    Convert a list of CompanyRecord paper objects into a Feynman-friendly
-    context string. Feynman accepts natural language + DOI/URL references.
+    Convert found papers into a compact context block.
 
-    Returns a multi-line string ready to pass to: feynman "<context>"
+    This is used for topic-level workflows like lit / deepresearch.
     """
-    lines = [f"Research topic: {topic}", ""]
-    lines.append("Key papers found by search agent:")
-    lines.append("")
+    lines = [f"Research topic: {topic}", "", "Key papers found by the search agent:", ""]
 
-    for i, p in enumerate(papers[:max_papers], 1):
-        title   = p.company_name or "Untitled"
-        authors = p.authors or "Unknown authors"
-        doi     = p.doi or ""
-        url     = p.website or p.source_url or ""
-        year    = p.publication_year or ""
-        abstract_snippet = (p.description or "")[:200].strip()
+    for i, paper in enumerate(papers[:max_papers], 1):
+        title = _paper_title(paper)
+        authors = _paper_authors(paper)
+        year = _paper_year(paper)
+        ref = _best_reference(paper)
+        abstract = _truncate(_paper_abstract(paper), 700)
 
         lines.append(f"{i}. {title}")
-        if authors and authors != "Unknown authors":
+        if authors:
             lines.append(f"   Authors: {authors}")
         if year:
             lines.append(f"   Year: {year}")
-        ref = doi or url
         if ref:
             lines.append(f"   Source: {ref}")
-        if abstract_snippet:
-            lines.append(f"   Abstract: {abstract_snippet}...")
+        if abstract:
+            lines.append(f"   Abstract: {abstract}")
         lines.append("")
 
     return "\n".join(lines)
 
 
-def papers_to_doi_list(papers: List[CompanyRecord]) -> List[str]:
-    """Extract DOIs / URLs from papers for batch Feynman processing."""
-    refs = []
-    for p in papers:
-        if p.doi:
-            # Extract bare DOI (e.g. 10.1234/xyz) from URL
-            m = re.search(r"(10\.\d{4,}/\S+)", p.doi)
-            if m:
-                refs.append(m.group(1).rstrip("."))
-                continue
-        if p.website and ("doi.org" in p.website or "arxiv.org" in p.website):
-            refs.append(p.website)
-        elif p.website:
-            refs.append(p.website)
-    return refs
+def _build_per_paper_summary_prompt(topic: str, paper: CompanyRecord) -> str:
+    """
+    Build a deterministic structured prompt for one paper summary.
+    """
+    title = _paper_title(paper)
+    authors = _paper_authors(paper)
+    year = _paper_year(paper)
+    ref = _best_reference(paper)
+    abstract = _truncate(_paper_abstract(paper), 2500)
+
+    return f"""
+Summarize the following research paper for the topic: {topic}
+
+Return your answer in this exact structure:
+
+Title:
+One-line relevance:
+Plain-English summary:
+Main contribution:
+Method / model:
+Data / benchmark:
+Key findings:
+Limitations:
+Practical relevance:
+Confidence note:
+
+Paper title: {title}
+Authors: {authors}
+Year: {year}
+Reference: {ref}
+Abstract / context:
+{abstract}
+""".strip()
+
+
+def _build_review_markdown(topic: str, papers: List[CompanyRecord], max_papers: int = 10) -> str:
+    """
+    Build a markdown artifact in case you want to run `feynman review`
+    against a local file.
+    """
+    lines = [f"# Research packet for: {topic}", ""]
+    for i, paper in enumerate(papers[:max_papers], 1):
+        lines.append(f"## {i}. {_paper_title(paper)}")
+        lines.append(f"- Authors: {_paper_authors(paper)}")
+        year = _paper_year(paper)
+        if year:
+            lines.append(f"- Year: {year}")
+        ref = _best_reference(paper)
+        if ref:
+            lines.append(f"- Reference: {ref}")
+        abstract = _paper_abstract(paper)
+        if abstract:
+            lines.append("")
+            lines.append("### Abstract / Context")
+            lines.append(abstract)
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Feynman workflow runners
+# Core Feynman workflow wrappers
 # ---------------------------------------------------------------------------
 
-def run_feynman_lit_review(
+def run_feynman_paper_summary(
     topic: str,
-    papers: List[CompanyRecord],
-    timeout: int = 300,
+    paper: CompanyRecord,
+    timeout: int = 180,
 ) -> Dict[str, Any]:
     """
-    Run: feynman lit "<topic with paper context>"
+    Summarize one paper.
 
-    Feynman's /lit workflow produces a literature review with:
-    - Consensus findings across papers
-    - Open questions and gaps
-    - Inline citations to source papers
-
-    Returns dict with keys: success, output, error, command
+    Uses:
+        feynman chat "<structured prompt>"
     """
     if not is_feynman_installed():
         return {
             "success": False,
-            "error": "Feynman not installed. Run: curl -fsSL https://feynman.is/install | bash",
+            "error": f"Feynman not installed. Run: {install_feynman_command()}",
             "output": "",
             "command": "",
         }
 
-    context = papers_to_feynman_context(papers, topic, max_papers=15)
-    prompt  = f"Literature review on: {topic}\n\n{context}"
+    prompt = _build_per_paper_summary_prompt(topic, paper)
+    return _run_feynman_command(["feynman", "chat", prompt], timeout=timeout)
 
-    return _run_feynman_command(
-        ["feynman", "lit", prompt],
-        timeout=timeout,
+
+def run_feynman_lit_review(
+    topic: str,
+    papers: List[CompanyRecord],
+    timeout: int = 420,
+) -> Dict[str, Any]:
+    """
+    Run topic-level literature review.
+
+    Uses:
+        feynman lit "<topic + context>"
+    """
+    if not is_feynman_installed():
+        return {
+            "success": False,
+            "error": f"Feynman not installed. Run: {install_feynman_command()}",
+            "output": "",
+            "command": "",
+        }
+
+    context = papers_to_feynman_context(papers, topic, max_papers=12)
+    prompt = (
+        f"Literature review on: {topic}\n\n"
+        "Prioritize the papers listed below first. "
+        "Write consensus findings, disagreements, gaps, and open questions.\n\n"
+        f"{context}"
     )
+    return _run_feynman_command(["feynman", "lit", prompt], timeout=timeout)
 
 
 def run_feynman_deep_research(
     topic: str,
     papers: List[CompanyRecord],
-    timeout: int = 600,
+    timeout: int = 900,
 ) -> Dict[str, Any]:
     """
-    Run: feynman deepresearch "<topic>"
+    Run topic-level deep research.
 
-    Feynman's multi-agent /deepresearch workflow:
-    1. Researcher agent hunts evidence
-    2. Reviewer runs simulated peer review
-    3. Writer drafts a cited research brief
-    4. Verifier checks all citations
-
-    Returns dict with: success, output, error, command
+    Uses:
+        feynman deepresearch "<topic + context>"
     """
     if not is_feynman_installed():
         return {
             "success": False,
-            "error": "Feynman not installed. Run: curl -fsSL https://feynman.is/install | bash",
+            "error": f"Feynman not installed. Run: {install_feynman_command()}",
             "output": "",
             "command": "",
         }
 
     context = papers_to_feynman_context(papers, topic, max_papers=10)
-    prompt  = f"{topic}\n\nContext from preliminary search:\n{context}"
-
-    return _run_feynman_command(
-        ["feynman", "deepresearch", prompt],
-        timeout=timeout,
+    prompt = (
+        f"Deep research on: {topic}\n\n"
+        "Start from these papers found by my upstream search agent. "
+        "Prioritize them in the synthesis before broadening to external evidence.\n\n"
+        f"{context}"
     )
+    return _run_feynman_command(["feynman", "deepresearch", prompt], timeout=timeout)
+
+
+def run_feynman_review(
+    topic: str,
+    papers: List[CompanyRecord],
+    timeout: int = 300,
+) -> Dict[str, Any]:
+    """
+    Run a peer review on a generated local markdown artifact.
+
+    Uses:
+        feynman review <local_markdown_file>
+    """
+    if not is_feynman_installed():
+        return {
+            "success": False,
+            "error": f"Feynman not installed. Run: {install_feynman_command()}",
+            "output": "",
+            "severity_counts": {},
+            "command": "",
+        }
+
+    import tempfile
+
+    review_text = _build_review_markdown(topic, papers, max_papers=10)
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as tmp:
+            temp_path = tmp.name
+            tmp.write(review_text)
+
+        result = _run_feynman_command(["feynman", "review", temp_path], timeout=timeout)
+        output = result.get("output", "")
+        result["severity_counts"] = {
+            "critical": len(re.findall(r"(?i)\bcritical\b", output)),
+            "major": len(re.findall(r"(?i)\bmajor\b", output)),
+            "minor": len(re.findall(r"(?i)\bminor\b", output)),
+            "nit": len(re.findall(r"(?i)\bnit\b", output)),
+        }
+        return result
+    finally:
+        if temp_path:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def run_feynman_audit(
     paper: CompanyRecord,
-    timeout: int = 120,
+    timeout: int = 300,
 ) -> Dict[str, Any]:
     """
-    Run: feynman audit <doi_or_arxiv_id>
+    Run code/claim audit where possible.
 
-    Feynman's /audit workflow checks whether a paper's claims
-    match its actual codebase. Useful for reproducibility checks.
+    Best inputs:
+    - arxiv:<id>
+    - GitHub repo URL
 
-    Returns dict with: success, output, error, is_mismatch, command
+    If neither exists, skip gracefully.
     """
     if not is_feynman_installed():
         return {
@@ -242,23 +530,23 @@ def run_feynman_audit(
             "command": "",
         }
 
-    # Extract arxiv ID or DOI
+    website = _safe_get(paper, "website")
+    source_url = _safe_get(paper, "source_url")
+    doi = _safe_get(paper, "doi")
+
     ref = ""
-    if paper.doi:
-        m = re.search(r"(10\.\d{4,}/\S+)", paper.doi)
-        if m:
-            ref = m.group(1).rstrip(".")
-    if not ref and paper.website:
-        arxiv_m = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d+)", paper.website)
-        if arxiv_m:
-            ref = arxiv_m.group(1)
-    if not ref:
-        ref = paper.website or paper.source_url or ""
+    arxiv_id = _extract_arxiv_id(website) or _extract_arxiv_id(source_url) or _extract_arxiv_id(doi)
+    if arxiv_id:
+        ref = arxiv_id
+    elif "github.com/" in website:
+        ref = website
+    elif "github.com/" in source_url:
+        ref = source_url
 
     if not ref:
         return {
             "success": False,
-            "error": f"No DOI or arXiv ID found for: {paper.company_name}",
+            "error": f"Audit needs arXiv ID or GitHub URL for: {_paper_title(paper)}",
             "output": "",
             "is_mismatch": False,
             "command": "",
@@ -269,219 +557,516 @@ def run_feynman_audit(
     return result
 
 
-def run_feynman_review(
-    topic: str,
-    papers: List[CompanyRecord],
-    timeout: int = 180,
-) -> Dict[str, Any]:
-    """
-    Run: feynman review "<draft content>"
-
-    Feynman's /review workflow performs simulated peer review with:
-    - Severity-graded feedback (critical / major / minor)
-    - A revision plan
-
-    Returns dict with: success, output, error, severity_counts, command
-    """
-    if not is_feynman_installed():
-        return {
-            "success": False,
-            "error": "Feynman not installed.",
-            "output": "",
-            "severity_counts": {},
-            "command": "",
-        }
-
-    context = papers_to_feynman_context(papers, topic, max_papers=10)
-    result  = _run_feynman_command(
-        ["feynman", "review", f"Peer review this research on {topic}:\n\n{context}"],
-        timeout=timeout,
-    )
-
-    # Parse severity counts from output
-    output = result.get("output", "")
-    result["severity_counts"] = {
-        "critical": len(re.findall(r"(?i)critical", output)),
-        "major":    len(re.findall(r"(?i)major",    output)),
-        "minor":    len(re.findall(r"(?i)minor",    output)),
-    }
-    return result
-
-
-def run_feynman_watch(
-    topic: str,
-    interval_hours: int = 24,
-) -> Dict[str, Any]:
-    """
-    Run: feynman watch "<topic>"
-
-    Sets up a recurring monitor that alerts when new papers appear.
-    Useful for ongoing research tracking.
-    """
-    if not is_feynman_installed():
-        return {"success": False, "error": "Feynman not installed.", "output": "", "command": ""}
-
-    return _run_feynman_command(
-        ["feynman", "watch", topic, "--interval", str(interval_hours)],
-        timeout=30,
-    )
-
-
 # ---------------------------------------------------------------------------
-# Enrich paper records with Feynman synthesis
+# Main automatic summarization entry point
 # ---------------------------------------------------------------------------
 
 def enrich_papers_with_feynman(
     papers: List[CompanyRecord],
     topic: str,
-    mode: str = "lit",
+    mode: str = "paper_summaries",
     progress_callback=None,
+    per_paper_limit: int = 5,
+    include_global_synthesis: bool = True,
+    synthesis_mode: str = "lit",
 ) -> Tuple[List[CompanyRecord], str]:
     """
-    Run Feynman on the found papers and enrich each record's description
-    with Feynman's synthesis. Also returns the full Feynman report.
+    Main function to enrich search results automatically.
+
+    Default behavior:
+    - summarize top N papers individually into paper.notes
+    - optionally generate one combined synthesis report
 
     Args:
-        papers:            List of paper CompanyRecord objects
-        topic:             Research topic string
-        mode:              "lit" | "deepresearch" | "audit" | "review"
-        progress_callback: Optional callable(str) for progress updates
+        papers: list of CompanyRecord objects representing papers
+        topic: search topic
+        mode:
+            "paper_summaries" -> summarize papers one by one
+            "lit"             -> only literature review
+            "deepresearch"    -> only deep research
+            "review"          -> review a local packet
+            "audit"           -> audit each paper where possible
+        progress_callback: optional status callback
+        per_paper_limit: number of papers to summarize individually
+        include_global_synthesis: whether to also generate one combined report
+        synthesis_mode: "lit" or "deepresearch"
 
     Returns:
-        (enriched_papers, full_feynman_report_text)
+        enriched_papers, synthesis_report
     """
-    def _log(msg: str):
+    def _log(msg: str) -> None:
         if progress_callback:
             progress_callback(msg)
 
-    if not is_feynman_installed():
-        _log("⚠️ Feynman not installed — skipping deep synthesis")
+    if not papers:
+        _log("⚠️ No papers found to summarize.")
         return papers, ""
 
-    _log(f"🔬 Running Feynman {mode} on {len(papers)} papers...")
+    if not is_feynman_installed():
+        _log("⚠️ Feynman not installed — skipping summarization.")
+        return papers, ""
 
-    if mode == "lit":
-        result = run_feynman_lit_review(topic, papers)
-    elif mode == "deepresearch":
-        result = run_feynman_deep_research(topic, papers)
-    elif mode == "review":
-        result = run_feynman_review(topic, papers)
-    elif mode == "audit":
-        # Audit each paper individually for code/claim mismatches
+    synthesis_report = ""
+
+    if mode == "audit":
+        _log(f"🔍 Running Feynman audit on {len(papers)} papers...")
         for paper in papers:
             audit = run_feynman_audit(paper)
             if audit["success"]:
                 tag = "⚠️ MISMATCH" if audit.get("is_mismatch") else "✅ VERIFIED"
-                paper.notes = f"{tag} | {paper.notes or ''}"
-                _log(f"  {tag}: {paper.company_name[:50]}")
-        return papers, "Audit complete — see notes column"
-    else:
-        return papers, ""
+                existing = _safe_get(paper, "notes")
+                paper.notes = f"{tag}\n{existing}".strip()
+                _log(f"  {tag}: {_paper_title(paper)[:60]}")
+            else:
+                paper.notes = f"[Audit skipped] {audit['error']}"
+        return papers, "Audit complete."
 
-    if not result["success"]:
-        _log(f"⚠️ Feynman error: {result.get('error', 'unknown')}")
-        return papers, result.get("error", "")
+    if mode in {"paper_summaries", "summaries"}:
+        limit = min(len(papers), max(1, per_paper_limit))
+        _log(f"🔬 Summarizing {limit} papers with Feynman...")
+        for idx, paper in enumerate(papers[:limit], 1):
+            result = run_feynman_paper_summary(topic, paper)
+            if result["success"] and result.get("output"):
+                paper.notes = result["output"]
+                _log(f"  ✅ summarized {idx}/{limit}: {_paper_title(paper)[:60]}")
+            else:
+                err = result.get("error") or "Unknown error"
+                paper.notes = f"[Feynman summary error] {err}"
+                _log(f"  ⚠️ summary failed {idx}/{limit}: {_paper_title(paper)[:60]}")
 
-    report = result.get("output", "")
-    _log(f"✅ Feynman synthesis complete ({len(report)} chars)")
+        # Keep non-summarized papers untouched but add a gentle note if desired
+        for paper in papers[limit:]:
+            if not _safe_get(paper, "notes"):
+                paper.notes = ""
 
-    # Attach a short excerpt of the synthesis to the first paper's description
-    # as a "synthesis note" — the full report is returned separately
-    if papers and report:
-        excerpt = report[:500].strip()
-        papers[0].notes = f"[Feynman synthesis] {excerpt}..."
+        if include_global_synthesis:
+            _log(f"🧠 Running combined {synthesis_mode} report...")
+            if synthesis_mode == "deepresearch":
+                synth = run_feynman_deep_research(topic, papers)
+            else:
+                synth = run_feynman_lit_review(topic, papers)
 
-    return papers, report
+            if synth["success"]:
+                synthesis_report = synth.get("output", "")
+                _log("✅ Combined synthesis complete.")
+            else:
+                synthesis_report = synth.get("error", "")
+                _log(f"⚠️ Combined synthesis failed: {synthesis_report}")
+
+        return papers, synthesis_report
+
+    if mode == "lit":
+        result = run_feynman_lit_review(topic, papers)
+        return papers, result.get("output", "") if result["success"] else result.get("error", "")
+
+    if mode == "deepresearch":
+        result = run_feynman_deep_research(topic, papers)
+        return papers, result.get("output", "") if result["success"] else result.get("error", "")
+
+    if mode == "review":
+        result = run_feynman_review(topic, papers)
+        return papers, result.get("output", "") if result["success"] else result.get("error", "")
+
+    return papers, synthesis_report
 
 
 # ---------------------------------------------------------------------------
-# Internal subprocess runner
+# Report rendering + export
 # ---------------------------------------------------------------------------
 
-def _run_feynman_command(
-    cmd: List[str],
-    timeout: int = 300,
-    env: Optional[Dict[str, str]] = None,
+def _build_markdown_report(
+    topic: str,
+    papers: List[CompanyRecord],
+    synthesis_report: str = "",
+) -> str:
+    """
+    Build a nicely structured markdown report.
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines: List[str] = [
+        f"# Research Summary Report",
+        "",
+        f"**Topic:** {topic}",
+        f"**Generated:** {now}",
+        f"**Papers included:** {len(papers)}",
+        "",
+    ]
+
+    if synthesis_report:
+        lines.extend([
+            "## Combined Topic Synthesis",
+            "",
+            synthesis_report.strip(),
+            "",
+        ])
+
+    lines.extend([
+        "## Paper-by-Paper Summaries",
+        "",
+    ])
+
+    for i, paper in enumerate(papers, 1):
+        title = _paper_title(paper)
+        authors = _paper_authors(paper)
+        year = _paper_year(paper)
+        ref = _best_reference(paper)
+        abstract = _truncate(_paper_abstract(paper), 1200)
+        notes = _safe_get(paper, "notes")
+
+        lines.append(f"### {i}. {title}")
+        lines.append("")
+        lines.append(f"- **Authors:** {authors}")
+        if year:
+            lines.append(f"- **Year:** {year}")
+        if ref:
+            lines.append(f"- **Reference:** {ref}")
+        lines.append("")
+
+        if notes:
+            lines.append("**Feynman Summary**")
+            lines.append("")
+            lines.append(notes.strip())
+            lines.append("")
+
+        if abstract:
+            lines.append("**Original Abstract / Context**")
+            lines.append("")
+            lines.append(abstract)
+            lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _markdown_to_simple_html(markdown_text: str, title: str = "Research Summary") -> str:
+    """
+    Very lightweight markdown-ish to HTML conversion.
+    Enough for browser viewing or future HTML export.
+    """
+    html_lines = [
+        "<!doctype html>",
+        "<html>",
+        "<head>",
+        '  <meta charset="utf-8">',
+        f"  <title>{escape(title)}</title>",
+        "  <style>",
+        "    body { font-family: Arial, Helvetica, sans-serif; margin: 40px; line-height: 1.55; color: #222; }",
+        "    h1, h2, h3 { color: #0f172a; }",
+        "    pre { white-space: pre-wrap; font-family: inherit; }",
+        "    .meta { color: #475569; }",
+        "    .block { margin-bottom: 18px; }",
+        "    hr { border: none; border-top: 1px solid #cbd5e1; margin: 24px 0; }",
+        "  </style>",
+        "</head>",
+        "<body>",
+    ]
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            html_lines.append("<div class='block'></div>")
+            continue
+        if line.startswith("# "):
+            html_lines.append(f"<h1>{escape(line[2:])}</h1>")
+        elif line.startswith("## "):
+            html_lines.append(f"<h2>{escape(line[3:])}</h2>")
+        elif line.startswith("### "):
+            html_lines.append(f"<h3>{escape(line[4:])}</h3>")
+        elif line.startswith("- **"):
+            html_lines.append(f"<div class='meta'>{escape(line)}</div>")
+        else:
+            html_lines.append(f"<p>{escape(line)}</p>")
+
+    html_lines.extend(["</body>", "</html>"])
+    return "\n".join(html_lines)
+
+
+def export_research_summary_markdown(
+    topic: str,
+    papers: List[CompanyRecord],
+    synthesis_report: str = "",
+    output_dir: str = "outputs",
+    base_filename: Optional[str] = None,
+) -> str:
+    """
+    Export combined research summary to Markdown.
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = base_filename or f"research_summary_{_slugify(topic)}"
+    md_path = out_dir / f"{slug}.md"
+    md_path.write_text(
+        _build_markdown_report(topic, papers, synthesis_report),
+        encoding="utf-8",
+    )
+    return str(md_path)
+
+
+def export_research_summary_pdf(
+    topic: str,
+    papers: List[CompanyRecord],
+    synthesis_report: str = "",
+    output_dir: str = "outputs",
+    base_filename: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run a Feynman CLI command and capture output."""
-    env_full = {**os.environ, **(env or {})}
+    """
+    Export combined research summary to PDF.
+
+    Strategy:
+    1. Try reportlab.
+    2. If reportlab is missing, also save Markdown and return an informative error.
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = base_filename or f"research_summary_{_slugify(topic)}"
+    pdf_path = out_dir / f"{slug}.pdf"
+    md_path = out_dir / f"{slug}.md"
+
+    markdown_text = _build_markdown_report(topic, papers, synthesis_report)
+    md_path.write_text(markdown_text, encoding="utf-8")
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env_full,
-        )
-        success = proc.returncode == 0
-        output  = (proc.stdout or "").strip()
-        error   = (proc.stderr or "").strip() if not success else ""
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import cm
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        from reportlab.pdfgen import canvas
 
+        c = canvas.Canvas(str(pdf_path), pagesize=A4)
+        width, height = A4
+        left = 2.0 * cm
+        right = 2.0 * cm
+        top = height - 2.0 * cm
+        bottom = 2.0 * cm
+        usable_width = width - left - right
+
+        def draw_wrapped_paragraph(text: str, y: float, font_name: str = "Helvetica", font_size: int = 10,
+                                   leading: int = 14, bold: bool = False) -> float:
+            nonlocal c
+            current_font = "Helvetica-Bold" if bold else font_name
+            c.setFont(current_font, font_size)
+
+            if not text:
+                return y - leading
+
+            words = text.split()
+            if not words:
+                return y - leading
+
+            line = ""
+            lines = []
+            for word in words:
+                test_line = f"{line} {word}".strip()
+                if stringWidth(test_line, current_font, font_size) <= usable_width:
+                    line = test_line
+                else:
+                    if line:
+                        lines.append(line)
+                    line = word
+            if line:
+                lines.append(line)
+
+            for ln in lines:
+                if y < bottom + leading:
+                    c.showPage()
+                    y = top
+                    c.setFont(current_font, font_size)
+                c.drawString(left, y, ln)
+                y -= leading
+
+            return y - 4
+
+        y = top
+        c.setTitle(f"Research Summary - {topic}")
+
+        y = draw_wrapped_paragraph("Research Summary Report", y, font_size=16, leading=20, bold=True)
+        y = draw_wrapped_paragraph(f"Topic: {topic}", y, font_size=11, leading=15)
+        y = draw_wrapped_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", y, font_size=10, leading=14)
+        y = draw_wrapped_paragraph(f"Papers included: {len(papers)}", y, font_size=10, leading=14)
+        y -= 8
+
+        if synthesis_report:
+            y = draw_wrapped_paragraph("Combined Topic Synthesis", y, font_size=13, leading=18, bold=True)
+            for para in synthesis_report.splitlines():
+                if para.strip():
+                    y = draw_wrapped_paragraph(para.strip(), y, font_size=10, leading=14)
+
+        y = draw_wrapped_paragraph("Paper-by-Paper Summaries", y, font_size=13, leading=18, bold=True)
+
+        for i, paper in enumerate(papers, 1):
+            y = draw_wrapped_paragraph(f"{i}. {_paper_title(paper)}", y, font_size=12, leading=16, bold=True)
+            y = draw_wrapped_paragraph(f"Authors: {_paper_authors(paper)}", y)
+            year = _paper_year(paper)
+            if year:
+                y = draw_wrapped_paragraph(f"Year: {year}", y)
+            ref = _best_reference(paper)
+            if ref:
+                y = draw_wrapped_paragraph(f"Reference: {ref}", y)
+
+            notes = _safe_get(paper, "notes")
+            if notes:
+                y = draw_wrapped_paragraph("Feynman Summary:", y, font_size=10, leading=14, bold=True)
+                for para in notes.splitlines():
+                    if para.strip():
+                        y = draw_wrapped_paragraph(para.strip(), y, font_size=10, leading=14)
+
+            abstract = _truncate(_paper_abstract(paper), 1000)
+            if abstract:
+                y = draw_wrapped_paragraph("Original Abstract / Context:", y, font_size=10, leading=14, bold=True)
+                for para in abstract.splitlines():
+                    if para.strip():
+                        y = draw_wrapped_paragraph(para.strip(), y, font_size=10, leading=14)
+
+            y -= 8
+
+        c.save()
         return {
-            "success":  success,
-            "output":   output,
-            "error":    error,
-            "command":  " ".join(cmd[:3]) + " ...",
-            "returncode": proc.returncode,
+            "success": True,
+            "pdf_path": str(pdf_path),
+            "markdown_path": str(md_path),
+            "error": "",
         }
-    except subprocess.TimeoutExpired:
+
+    except ImportError:
         return {
-            "success":  False,
-            "output":   "",
-            "error":    f"Feynman timed out after {timeout}s",
-            "command":  " ".join(cmd[:3]) + " ...",
-            "returncode": -1,
+            "success": False,
+            "pdf_path": "",
+            "markdown_path": str(md_path),
+            "error": "reportlab is not installed. Run: pip install reportlab",
         }
-    except FileNotFoundError:
+    except Exception as exc:
         return {
-            "success":  False,
-            "output":   "",
-            "error":    "feynman command not found — install with: curl -fsSL https://feynman.is/install | bash",
-            "command":  " ".join(cmd[:3]) + " ...",
-            "returncode": -1,
+            "success": False,
+            "pdf_path": "",
+            "markdown_path": str(md_path),
+            "error": f"PDF export failed: {exc}",
         }
-    except Exception as e:
-        return {
-            "success":  False,
-            "output":   "",
-            "error":    str(e),
-            "command":  " ".join(cmd[:3]) + " ...",
-            "returncode": -1,
-        }
+
+
+def auto_summarize_and_export(
+    papers: List[CompanyRecord],
+    topic: str,
+    export_dir: str = "outputs",
+    export_pdf: bool = True,
+    per_paper_limit: int = 5,
+    synthesis_mode: str = "lit",
+    progress_callback=None,
+) -> Tuple[List[CompanyRecord], str, Dict[str, str]]:
+    """
+    High-level one-call helper for your app.
+
+    This is the function you likely want to call after the search step.
+
+    Steps:
+    1. Summarize papers automatically
+    2. Generate one combined synthesis report
+    3. Export markdown
+    4. Optionally export PDF
+
+    Returns:
+        enriched_papers, synthesis_report, export_paths
+    """
+    papers, synthesis_report = enrich_papers_with_feynman(
+        papers=papers,
+        topic=topic,
+        mode="paper_summaries",
+        progress_callback=progress_callback,
+        per_paper_limit=per_paper_limit,
+        include_global_synthesis=True,
+        synthesis_mode=synthesis_mode,
+    )
+
+    export_paths: Dict[str, str] = {}
+
+    md_path = export_research_summary_markdown(
+        topic=topic,
+        papers=papers,
+        synthesis_report=synthesis_report,
+        output_dir=export_dir,
+    )
+    export_paths["markdown"] = md_path
+
+    if export_pdf:
+        pdf_result = export_research_summary_pdf(
+            topic=topic,
+            papers=papers,
+            synthesis_report=synthesis_report,
+            output_dir=export_dir,
+        )
+        if pdf_result.get("markdown_path"):
+            export_paths["markdown"] = pdf_result["markdown_path"]
+        if pdf_result.get("pdf_path"):
+            export_paths["pdf"] = pdf_result["pdf_path"]
+        if pdf_result.get("error"):
+            export_paths["pdf_error"] = pdf_result["error"]
+
+    return papers, synthesis_report, export_paths
 
 
 # ---------------------------------------------------------------------------
-# Integration guide (printed when module is run directly)
+# Optional UI helper
+# ---------------------------------------------------------------------------
+
+def build_export_preview_text(
+    topic: str,
+    papers: List[CompanyRecord],
+    synthesis_report: str = "",
+) -> str:
+    """
+    Small plain-text preview for UI tabs or debug logs.
+    """
+    lines = [
+        f"Topic: {topic}",
+        f"Papers: {len(papers)}",
+        "",
+    ]
+
+    if synthesis_report:
+        lines.append("Combined synthesis:")
+        lines.append(_truncate(synthesis_report, 1200))
+        lines.append("")
+
+    lines.append("Paper summaries:")
+    for i, paper in enumerate(papers, 1):
+        title = _paper_title(paper)
+        note = _safe_get(paper, "notes")
+        lines.append(f"{i}. {title}")
+        lines.append(_truncate(note, 500) if note else "[No summary]")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# CLI info when run directly
 # ---------------------------------------------------------------------------
 
 INTEGRATION_GUIDE = """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║           FEYNMAN + AI RESEARCH AGENT — INTEGRATION GUIDE               ║
+║      FEYNMAN + AI RESEARCH AGENT — AUTO SUMMARY + PDF EXPORT            ║
 ╠══════════════════════════════════════════════════════════════════════════╣
 ║                                                                          ║
-║  STEP 1 — Install Feynman (one-time)                                     ║
-║    curl -fsSL https://feynman.is/install | bash                          ║
+║  ONE-CALL FLOW                                                           ║
+║    1) agent finds papers                                                 ║
+║    2) auto_summarize_and_export(...)                                     ║
+║    3) paper.notes gets paper summaries                                   ║
+║    4) one combined synthesis report is generated                         ║
+║    5) markdown + optional PDF are written to disk                        ║
 ║                                                                          ║
-║  STEP 2 — Run your agent to find papers (as normal)                      ║
-║    Prompt: "Find papers about ESP electrical submersible pump"           ║
-║    → Agent finds 20–80 papers with titles, authors, DOIs                 ║
+║  MAIN FUNCTION                                                           ║
+║    auto_summarize_and_export(                                            ║
+║        papers=found_papers,                                              ║
+║        topic=user_prompt,                                                ║
+║        export_dir="outputs",                                             ║
+║        export_pdf=True,                                                  ║
+║        per_paper_limit=5,                                                ║
+║        synthesis_mode="lit",                                             ║
+║    )                                                                     ║
 ║                                                                          ║
-║  STEP 3 — In Results tab, click "🔬 Deep Research with Feynman"          ║
-║    Choose a workflow:                                                    ║
-║    • Literature Review  — consensus + open questions (feynman lit)       ║
-║    • Deep Research      — full multi-agent synthesis (feynman deepres.)  ║
-║    • Peer Review        — severity-graded critique (feynman review)      ║
-║    • Claim Audit        — code vs claim check (feynman audit)            ║
-║                                                                          ║
-║  STEP 4 — Export                                                         ║
-║    Combined output: papers list + Feynman report → PDF/Excel             ║
-║                                                                          ║
-║  WHAT EACH AGENT DOES:                                                   ║
-║    Researcher  → Searches papers, web, repos, docs for evidence          ║
-║    Reviewer    → Simulated peer review with severity scores              ║
-║    Writer      → Structures notes into cited research brief              ║
-║    Verifier    → Checks every citation URL, removes dead links           ║
+║  REQUIREMENTS                                                            ║
+║    - Feynman installed and set up                                        ║
+║    - Optional for PDF: reportlab                                         ║
+║      pip install reportlab                                               ║
 ║                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 """
