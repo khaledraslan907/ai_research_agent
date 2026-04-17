@@ -32,3 +32,6 @@ anthropic>=0.28.0              # Anthropic Claude (paid)
 # ── Utilities ─────────────────────────────────────
 python-dotenv>=1.0.0
 rapidfuzz>=3.6.0               # Fuzzy dedup
+
+reportlab
+openpyxl
