@@ -100,6 +100,48 @@ def _show_task_banner(task_spec: dict):
         st.caption("🌐 No geography filter — searching globally")
 
 
+def _paper_attr(paper, *names: str) -> str:
+    for name in names:
+        try:
+            value = getattr(paper, name, "")
+        except Exception:
+            value = ""
+        if value is not None and str(value).strip() and str(value).strip().lower() != "nan":
+            return str(value)
+    return ""
+
+
+def _paper_rows_for_display(papers: list[CompanyRecord], source_rows: list[dict] | None = None) -> pd.DataFrame:
+    rows = []
+    source_rows = source_rows or []
+    for idx, paper in enumerate(papers):
+        src = source_rows[idx] if idx < len(source_rows) else {}
+        rows.append({
+            "Title": _paper_attr(paper, "company_name", "title"),
+            "Authors": _paper_attr(paper, "authors"),
+            "Year": _paper_attr(paper, "publication_year", "year"),
+            "DOI": _paper_attr(paper, "doi"),
+            "URL": _paper_attr(paper, "website", "source_url"),
+            "AI Summary": _paper_attr(paper, "notes"),
+            "Abstract": _paper_attr(paper, "description", "abstract", "summary"),
+            "Confidence": src.get("confidence_score", ""),
+            "Source Provider": src.get("source_provider", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def _file_bytes(path_str: str) -> bytes | None:
+    if not path_str:
+        return None
+    try:
+        path = Path(path_str)
+        if path.exists() and path.is_file():
+            return path.read_bytes()
+    except Exception:
+        return None
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +252,15 @@ with st.sidebar:
         format_override = st.selectbox("Output format",
             ["auto","xlsx","csv","json","pdf"], index=0)
         export_filename = st.text_input("Export filename", value="results")
+        auto_summarize_papers = st.checkbox("Auto-summarize papers after search", value=True)
+        paper_summary_limit = st.number_input("Summarize top N papers", 1, 20, 5, step=1)
+        paper_synthesis_mode = st.selectbox(
+            "Combined synthesis mode",
+            ["lit", "deepresearch"],
+            index=0,
+            help="lit is faster. deepresearch is slower but more detailed.",
+        )
+        export_summary_pdf = st.checkbox("Create PDF research summary", value=True)
 
     # 9 — SEED FILE ───────────────────────────────────────────────────────────
     with st.expander("📂 Seed file — deduplication", expanded=False):
@@ -564,21 +615,77 @@ if run_btn:
     if result.get("llm_backends"):
         st.caption(f"🤖 LLM used: {', '.join(result['llm_backends'])}")
 
-    # ── TABS ─────────────────────────────────────────────────────────────────
+    # ── TABS + AUTO PAPER SUMMARY ───────────────────────────────────────────
     _is_paper_search = task_spec.task_type == "document_research"
+    paper_records: list[CompanyRecord] = []
+    paper_display_df = pd.DataFrame()
+    paper_export_paths: dict[str, str] = {}
+    paper_summary_report = ""
+    paper_summary_error = ""
+    paper_summary_enabled = _is_paper_search and auto_summarize_papers
+
     if _is_paper_search:
-        tab_accept, tab_feynman, tab_reject, tab_task, tab_log, tab_budget = st.tabs([
-            "✅ Results", "🔬 Deep Research (Feynman)", "❌ Rejected", "📋 Task", "📜 Log", "💰 Budget",
+        paper_records = [CompanyRecord(**r) for r in result.get("records", [])]
+        if paper_summary_enabled:
+            try:
+                from core.feynman_bridge import auto_summarize_and_export
+
+                summary_status = st.empty()
+                with st.spinner("🔬 Auto-summarizing papers and preparing research brief..."):
+                    def _paper_progress(msg: str):
+                        summary_status.caption(f"🔬 {msg}")
+
+                    paper_records, paper_summary_report, paper_export_paths = auto_summarize_and_export(
+                        papers=paper_records,
+                        topic=task_spec.industry or prompt,
+                        export_dir="outputs",
+                        export_pdf=export_summary_pdf,
+                        per_paper_limit=int(paper_summary_limit),
+                        synthesis_mode=paper_synthesis_mode,
+                        progress_callback=_paper_progress,
+                    )
+                summary_status.empty()
+                summary_engine = paper_export_paths.get("summary_engine", "built-in")
+                if summary_engine == "feynman":
+                    st.success(
+                        f"🧠 Automatic paper summaries ready · engine: Feynman · "
+                        f"{min(len(paper_records), int(paper_summary_limit))} paper summaries generated"
+                    )
+                else:
+                    st.success(
+                        f"🧠 Automatic paper summaries ready · engine: built-in fallback · "
+                        f"{min(len(paper_records), int(paper_summary_limit))} paper summaries generated"
+                    )
+                if paper_export_paths.get("pdf_error"):
+                    st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
+            except Exception as exc:
+                paper_summary_error = f"Automatic paper summarization failed: {exc}"
+                st.warning(paper_summary_error)
+
+        paper_display_df = _paper_rows_for_display(paper_records, result.get("records", []))
+        if "Confidence" in paper_display_df.columns:
+            paper_display_df = paper_display_df.sort_values("Confidence", ascending=False, na_position="last")
+
+    if _is_paper_search:
+        tab_accept, tab_summary, tab_download, tab_reject, tab_task, tab_log, tab_budget = st.tabs([
+            "✅ Results", "🧠 Auto Summary", "⬇️ Downloads", "❌ Rejected", "📋 Task", "📜 Log", "💰 Budget",
         ])
     else:
         tab_accept, tab_reject, tab_task, tab_log, tab_budget = st.tabs([
             "✅ Results", "❌ Rejected", "📋 Task", "📜 Log", "💰 Budget",
         ])
-        tab_feynman = None
+        tab_summary = None
+        tab_download = None
 
     with tab_accept:
         df = pd.DataFrame(result["records"])
-        if not df.empty:
+        if _is_paper_search:
+            if not paper_display_df.empty:
+                st.caption("For paper searches, the results below include the automatic AI summary for each paper.")
+                st.dataframe(paper_display_df, use_container_width=True, height=520)
+            else:
+                st.info("No paper records to display.")
+        elif not df.empty:
             # Build display columns from what was requested
             if task_spec.task_type == "people_search":
                 base = ["company_name", "job_title", "employer_name", "city",
@@ -594,7 +701,6 @@ if run_btn:
                 if "summary" in (task_spec.target_attributes or []):  base.append("description")
                 base += ["confidence_score", "source_provider"]
 
-            # Deduplicate columns (same col could appear twice if branches overlap)
             seen_cols: set = set()
             show_cols = []
             for c in base:
@@ -611,7 +717,7 @@ if run_btn:
             st.info("No accepted results. Check the Rejected tab.")
 
         ep = result.get("export_path", "")
-        if ep and Path(ep).exists():
+        if (not _is_paper_search) and ep and Path(ep).exists():
             with open(ep, "rb") as f:
                 st.download_button(
                     label=f"⬇️ Download {Path(ep).name}",
@@ -619,159 +725,116 @@ if run_btn:
                     mime="application/octet-stream",
                 )
 
-    # ── FEYNMAN DEEP RESEARCH TAB ─────────────────────────────────────────
-    if tab_feynman is not None:
-        with tab_feynman:
-            from core.feynman_bridge import (
-                is_feynman_installed, get_feynman_version,
-                run_feynman_lit_review, run_feynman_deep_research,
-                run_feynman_review, run_feynman_audit,
-                papers_to_feynman_context, papers_to_doi_list,
-                install_feynman_command, INTEGRATION_GUIDE,
-            )
+    if tab_summary is not None:
+        with tab_summary:
+            st.markdown("### 🧠 Automatic Paper Summary")
+            if paper_summary_error:
+                st.warning(paper_summary_error)
+            elif not paper_summary_enabled:
+                st.info("Automatic paper summarization is disabled in Advanced overrides.")
+            else:
+                if paper_export_paths.get("pdf"):
+                    st.success("PDF research brief is ready to download.")
+                elif paper_export_paths.get("markdown"):
+                    st.info("Markdown research brief is ready. PDF was not created.")
 
-            st.markdown("### 🔬 Deep Research with Feynman")
-            st.caption(
-                "Feynman is an open-source AI research agent that synthesizes "
-                "findings, verifies claims, and runs simulated peer review. "
-                "It works on the papers your agent already found."
-            )
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Papers found", len(paper_records))
+                c2.metric("Summaries created", min(len(paper_records), int(paper_summary_limit)))
+                c3.metric("PDF ready", "Yes" if paper_export_paths.get("pdf") else "No")
 
-            _feynman_ok = is_feynman_installed()
-            if not _feynman_ok:
-                st.warning(
-                    "**Feynman is not installed on this machine.**\n\n"
-                    "**Windows (PowerShell as Administrator):**\n"
-                    "```powershell\nirm https://feynman.is/install.ps1 | iex\n```\n\n"
-                    "**macOS / Linux:**\n"
-                    "```bash\ncurl -fsSL https://feynman.is/install | bash\n```\n\n"
-                    "Then restart this app and run `feynman setup` to configure your API key.\n\n"
-                    "[Feynman docs →](https://www.feynman.is/docs/getting-started/installation)"
+                if paper_summary_report:
+                    st.markdown("#### Combined topic synthesis")
+                    st.markdown(paper_summary_report)
+                elif not paper_records:
+                    st.info("No papers found to summarize.")
+                else:
+                    st.info("Per-paper summaries are attached to the results table. Combined synthesis was not generated.")
+
+                if not paper_display_df.empty:
+                    with st.expander("Paper summaries table", expanded=False):
+                        st.dataframe(
+                            paper_display_df[[c for c in ["Title", "Authors", "Year", "AI Summary"] if c in paper_display_df.columns]],
+                            use_container_width=True,
+                            height=420,
+                        )
+
+    if tab_download is not None:
+        with tab_download:
+            st.markdown("### ⬇️ Download paper outputs")
+            st.caption("For paper searches, downloads include the AI-enriched paper table and the combined research brief.")
+
+            dl_col1, dl_col2, dl_col3, dl_col4, dl_col5 = st.columns(5)
+            export_df = paper_display_df.copy() if not paper_display_df.empty else pd.DataFrame()
+
+            if not export_df.empty:
+                try:
+                    import io
+                    import openpyxl  # noqa: F401
+                    xl_buf = io.BytesIO()
+                    export_df.to_excel(xl_buf, index=False, engine="openpyxl")
+                    xl_buf.seek(0)
+                    dl_col1.download_button(
+                        "📊 Excel (.xlsx)",
+                        data=xl_buf,
+                        file_name=_normalize_filename(export_filename, "xlsx"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                except Exception:
+                    dl_col1.caption("Excel export unavailable")
+
+                dl_col2.download_button(
+                    "📄 CSV (.csv)",
+                    data=export_df.to_csv(index=False).encode("utf-8"),
+                    file_name=_normalize_filename(export_filename, "csv"),
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                dl_col3.download_button(
+                    "🔧 JSON (.json)",
+                    data=export_df.to_json(orient="records", indent=2).encode("utf-8"),
+                    file_name=_normalize_filename(export_filename, "json"),
+                    mime="application/json",
+                    use_container_width=True,
                 )
             else:
-                st.success(f"✅ Feynman installed — version: `{get_feynman_version()}`")
+                dl_col1.caption("No tabular paper results")
+                dl_col2.caption("")
+                dl_col3.caption("")
 
-            # Show what we'd pass to Feynman
-            _papers_for_feynman = [
-                CompanyRecord(**r) for r in result.get("records", [])
-                if r.get("page_type") == "document" or r.get("doi") or r.get("authors")
-            ]
-            st.info(
-                f"**{len(_papers_for_feynman)} papers** found by your search will be "
-                f"sent to Feynman for deep analysis."
-            )
-
-            # Context preview
-            with st.expander("📄 Preview: what will be sent to Feynman", expanded=False):
-                _ctx = papers_to_feynman_context(
-                    _papers_for_feynman, task_spec.industry or "research topic", max_papers=10
+            md_bytes = _file_bytes(paper_export_paths.get("markdown", ""))
+            if md_bytes:
+                dl_col4.download_button(
+                    "📝 Summary (.md)",
+                    data=md_bytes,
+                    file_name=Path(paper_export_paths["markdown"]).name,
+                    mime="text/markdown",
+                    use_container_width=True,
                 )
-                st.code(_ctx, language="text")
-                _dois = papers_to_doi_list(_papers_for_feynman)
-                if _dois:
-                    st.markdown(f"**DOIs / URLs available for audit:** {len(_dois)}")
-                    st.code("\n".join(_dois[:10]), language="text")
+            else:
+                dl_col4.caption("No markdown summary")
 
-            st.divider()
-            st.markdown("#### Choose a Feynman workflow")
+            pdf_bytes = _file_bytes(paper_export_paths.get("pdf", ""))
+            if pdf_bytes:
+                dl_col5.download_button(
+                    "📑 PDF brief",
+                    data=pdf_bytes,
+                    file_name=Path(paper_export_paths["pdf"]).name,
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            else:
+                dl_col5.caption("PDF not ready")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**📚 Literature Review** `feynman lit`")
-                st.caption("Consensus map + open questions. ~2–3 min.")
-                if st.button("Run Literature Review", key="feynman_lit", disabled=not _feynman_ok):
-                    with st.spinner("🔬 Feynman running literature review..."):
-                        _res = run_feynman_lit_review(
-                            topic=task_spec.industry or "research topic",
-                            papers=_papers_for_feynman,
-                        )
-                    if _res["success"]:
-                        st.success("✅ Literature review complete")
-                        st.markdown(_res["output"])
-                    else:
-                        st.error(f"❌ {_res['error']}")
+            if paper_export_paths.get("pdf_error"):
+                st.warning(f"PDF export note: {paper_export_paths['pdf_error']}")
 
-                st.markdown("**🧪 Peer Review** `feynman review`")
-                st.caption("Severity-graded critique + revision plan. ~2 min.")
-                if st.button("Run Peer Review", key="feynman_review", disabled=not _feynman_ok):
-                    with st.spinner("🔬 Feynman simulating peer review..."):
-                        _res = run_feynman_review(
-                            topic=task_spec.industry or "research topic",
-                            papers=_papers_for_feynman,
-                        )
-                    if _res["success"]:
-                        counts = _res.get("severity_counts", {})
-                        st.success(
-                            f"✅ Peer review complete — "
-                            f"Critical: {counts.get('critical',0)}, "
-                            f"Major: {counts.get('major',0)}, "
-                            f"Minor: {counts.get('minor',0)}"
-                        )
-                        st.markdown(_res["output"])
-                    else:
-                        st.error(f"❌ {_res['error']}")
-
-            with col2:
-                st.markdown("**🧠 Deep Research** `feynman deepresearch`")
-                st.caption("Full multi-agent: Researcher → Reviewer → Writer → Verifier. ~5–10 min.")
-                if st.button("Run Deep Research", key="feynman_deep", disabled=not _feynman_ok):
-                    with st.spinner("🧠 Feynman multi-agent deep research running..."):
-                        _res = run_feynman_deep_research(
-                            topic=task_spec.industry or "research topic",
-                            papers=_papers_for_feynman,
-                        )
-                    if _res["success"]:
-                        st.success("✅ Deep research complete")
-                        st.markdown(_res["output"])
-                        # Offer to download
-                        st.download_button(
-                            "⬇️ Download Research Brief",
-                            data=_res["output"],
-                            file_name=f"feynman_brief_{task_spec.industry or 'research'}.md",
-                            mime="text/markdown",
-                        )
-                    else:
-                        st.error(f"❌ {_res['error']}")
-
-                st.markdown("**🔍 Claim Audit** `feynman audit`")
-                st.caption("Checks if paper code matches claimed results. Per paper, ~1 min each.")
-                if st.button("Audit All Papers", key="feynman_audit", disabled=not _feynman_ok):
-                    audit_results = []
-                    _prog = st.progress(0)
-                    for idx, paper in enumerate(_papers_for_feynman[:10]):
-                        _prog.progress((idx + 1) / min(len(_papers_for_feynman), 10))
-                        with st.spinner(f"Auditing: {paper.company_name[:50]}..."):
-                            _ares = run_feynman_audit(paper)
-                        audit_results.append({
-                            "title":      paper.company_name[:60],
-                            "doi":        paper.doi or paper.website or "",
-                            "result":     "⚠️ MISMATCH" if _ares.get("is_mismatch") else ("✅ OK" if _ares["success"] else "❓ N/A"),
-                            "details":    _ares.get("output", "")[:200],
-                        })
-                    _prog.empty()
-                    if audit_results:
-                        import pandas as _pd
-                        st.dataframe(_pd.DataFrame(audit_results), use_container_width=True)
-
-            st.divider()
-            st.markdown("#### Run Feynman manually from your terminal")
-            st.caption(
-                "You can also run Feynman directly — paste these commands in your terminal:"
-            )
-            _ctx_short = papers_to_feynman_context(
-                _papers_for_feynman, task_spec.industry or "topic", max_papers=5
-            ).replace('"', '\\"')
-            topic_clean = (task_spec.industry or "research topic").replace('"', '')
-            st.code(
-                f'# Literature review\nfeynman lit "{topic_clean}"\n\n'
-                f'# Deep multi-agent research\nfeynman deepresearch "{topic_clean}"\n\n'
-                f'# Watch for new papers on this topic\nfeynman watch "{topic_clean}"\n\n'
-                + (
-                    f'# Audit a specific paper\nfeynman audit {_papers_for_feynman[0].doi or _papers_for_feynman[0].website}\n'
-                    if _papers_for_feynman else ""
-                ),
-                language="bash",
-            )
+            if not export_df.empty:
+                st.divider()
+                st.markdown("**Preview of the AI-enriched download:**")
+                st.dataframe(export_df.head(5), use_container_width=True)
+                st.caption(f"Showing first 5 of {len(export_df)} rows.")
 
     with tab_reject:
         rdf = pd.DataFrame(result.get("rejected_records", []))
