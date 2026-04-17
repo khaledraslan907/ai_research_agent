@@ -763,36 +763,36 @@ if run_btn and prompt.strip():
     if is_papers:
         paper_records = [CompanyRecord(**r) for r in result.get("records", [])]
         try:
-            from core.feynman_bridge import auto_summarize_and_export, is_feynman_installed, get_feynman_version
+            from core.feynman_bridge import auto_summarize_and_export
 
-            if is_feynman_installed():
-                summary_status = st.empty()
-                with st.spinner("🔬 Preparing automatic paper summaries and PDF brief..."):
-                    def _paper_progress(msg: str):
-                        summary_status.caption(f"🔬 {msg}")
+            summary_status = st.empty()
+            with st.spinner("🔬 Preparing automatic paper summaries and PDF brief..."):
+                def _paper_progress(msg: str):
+                    summary_status.caption(f"🔬 {msg}")
 
-                    paper_records, paper_summary_report, paper_export_paths = auto_summarize_and_export(
-                        papers=paper_records,
-                        topic=task_spec.industry or prompt,
-                        export_dir="outputs",
-                        export_pdf=export_summary_pdf,
-                        per_paper_limit=int(paper_summary_limit),
-                        synthesis_mode=paper_synthesis_mode,
-                        progress_callback=_paper_progress,
-                    )
-                summary_status.empty()
+                paper_records, paper_summary_report, paper_export_paths = auto_summarize_and_export(
+                    papers=paper_records,
+                    topic=task_spec.industry or prompt,
+                    export_dir="outputs",
+                    export_pdf=export_summary_pdf,
+                    per_paper_limit=int(paper_summary_limit),
+                    synthesis_mode=paper_synthesis_mode,
+                    progress_callback=_paper_progress,
+                )
+            summary_status.empty()
+            summary_engine = paper_export_paths.get("summary_engine", "built-in")
+            if summary_engine == "feynman":
                 st.success(
-                    f"🧠 Paper summary ready · Feynman {get_feynman_version()} · "
+                    f"🧠 Paper summary ready · engine: Feynman · "
                     f"{min(len(paper_records), int(paper_summary_limit))} summaries generated"
                 )
-                if paper_export_paths.get("pdf_error"):
-                    st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
             else:
-                paper_summary_error = (
-                    "Automatic paper summarization requires Feynman on the deployed machine. "
-                    "Paper results are still shown below."
+                st.success(
+                    f"🧠 Paper summary ready · engine: built-in fallback · "
+                    f"{min(len(paper_records), int(paper_summary_limit))} summaries generated"
                 )
-                st.warning(paper_summary_error)
+            if paper_export_paths.get("pdf_error"):
+                st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
         except Exception as exc:
             paper_summary_error = f"Automatic paper summarization failed: {exc}"
             st.warning(paper_summary_error)
