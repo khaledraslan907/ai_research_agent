@@ -455,7 +455,7 @@ with st.sidebar:
             ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)", "JSON (.json)"],
         )
         export_filename = st.text_input("Export filename", value="results")
-        paper_summary_limit = st.slider("Paper summaries to generate", 1, 10, 5)
+        paper_summary_limit = st.slider("Higher-quality Feynman summaries for top papers", 0, 10, 5, help="All papers will get a quick review. This controls how many top papers get the richer Feynman pass when available.")
         paper_synthesis_label = st.selectbox(
             "Paper summary depth",
             ["Literature review (faster)", "Deep research (slower)"],
@@ -784,12 +784,12 @@ if run_btn and prompt.strip():
             if summary_engine == "feynman":
                 st.success(
                     f"🧠 Paper summary ready · engine: Feynman · "
-                    f"{min(len(paper_records), int(paper_summary_limit))} summaries generated"
+                    f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} quick reviews generated"
                 )
             else:
                 st.success(
                     f"🧠 Paper summary ready · engine: built-in fallback · "
-                    f"{min(len(paper_records), int(paper_summary_limit))} summaries generated"
+                    f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} quick reviews generated"
                 )
             if paper_export_paths.get("pdf_error"):
                 st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
@@ -898,21 +898,21 @@ if run_btn and prompt.strip():
             else:
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Papers found", len(paper_records))
-                c2.metric("Summaries created", min(len(paper_records), int(paper_summary_limit)))
+                c2.metric("Quick reviews ready", sum(1 for p in paper_records if getattr(p, "notes", "")))
                 c3.metric("PDF ready", "Yes" if paper_export_paths.get("pdf") else "No")
 
-                if paper_summary_report:
-                    st.markdown(paper_summary_report)
-                else:
-                    st.info("Per-paper summaries are ready in the Results tab.")
+                st.info("Quick review summaries are attached to each paper below.")
 
                 if not paper_display_df.empty:
-                    with st.expander("Paper summary table", expanded=False):
-                        st.dataframe(
-                            paper_display_df[[c for c in ["Title", "Authors", "Year", "AI Summary"] if c in paper_display_df.columns]],
-                            use_container_width=True,
-                            height=420,
-                        )
+                    st.dataframe(
+                        paper_display_df[[c for c in ["Title", "Authors", "Year", "AI Summary"] if c in paper_display_df.columns]],
+                        use_container_width=True,
+                        height=460,
+                    )
+
+                if paper_summary_report:
+                    with st.expander("Topic overview (optional combined synthesis)", expanded=False):
+                        st.markdown(paper_summary_report)
 
     # ── Download tab ───────────────────────────────────────────────────────────
     with tab_download:
