@@ -181,40 +181,125 @@ def _top_keywords(texts: List[str], limit: int = 8) -> List[str]:
 
 
 
+def _looks_like_nonpaper(paper: CompanyRecord) -> bool:
+    title = _paper_title(paper).lower()
+    ref = _best_reference(paper).lower()
+
+    title_flags = [
+        "latest research papers", "journal", "conclusion -", "(pdf)",
+        "water pump", "sewage", "transfer", "koi pond", "fish tank",
+        "services", "sciencegate", "sciencedirect.com/journal"
+    ]
+    ref_flags = ["sciencegate", "sciencedirect.com/journal", "/keyword/", "/journal/"]
+
+    return any(flag in title for flag in title_flags) or any(flag in ref for flag in ref_flags)
+
+
+def _is_meaningful_sentence(sentence: str) -> bool:
+    s = _normalize_whitespace(sentence)
+    if not s:
+        return False
+    if len(s) < 45 or len(s) > 320:
+        return False
+    if re.search(r"https?://|www\.", s, re.I):
+        return False
+    if re.match(r"^[A-Z][a-z]+\s+\d{1,2},\s+\d{4}", s):
+        return False
+    if len(re.findall(r"\d", s)) > max(12, len(s) // 6):
+        return False
+    noisy_patterns = [r"\bvol\.?\b", r"\bno\.?\b", r"\bpp\.?\b", r"paper presented at", r"doi:"]
+    if any(re.search(p, s, re.I) for p in noisy_patterns):
+        return False
+    return len(re.findall(r"[A-Za-z]", s)) >= 30
+
+
+def _best_context_sentences(text: str, limit: int = 3) -> List[str]:
+    out: List[str] = []
+    for s in _split_sentences(text):
+        if _is_meaningful_sentence(s):
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _infer_focus_label(title: str, abstract: str) -> str:
+    hay = f"{title} {abstract}".lower()
+    mapping = [
+        ("review paper", ["review", "chronology"]),
+        ("case study", ["case study"]),
+        ("optimization study", ["optimization", "optimal", "design"]),
+        ("machine-learning study", ["machine learning", "deep learning", "artificial intelligence", "metric learners"]),
+        ("failure diagnosis study", ["failure", "fault diagnosis", "classification", "root cause"]),
+        ("energy-efficiency study", ["energy consumption", "energy efficiency", "efficiency"]),
+        ("flow / pump-performance study", ["fluid flow", "multi-stage", "pump performance", "screening"]),
+        ("artificial-lift / production study", ["artificial lift", "heavy oil", "production"])
+    ]
+    for label, terms in mapping:
+        if any(term in hay for term in terms):
+            return label
+    return "technical study"
+
+
+def _fallback_takeaway(topic: str, focus: str, has_abstract: bool, nonpaper: bool) -> str:
+    if nonpaper:
+        return "This result may be a landing page, index page, or commercial source rather than a full research article, so treat the review as low-confidence."
+    if has_abstract:
+        return f"The record looks relevant to {topic} and likely helps with understanding {focus}, but the available metadata may still be incomplete."
+    return "Only limited metadata was available, so this is a title-based quick review rather than a full paper summary."
+
+
 def _builtin_single_paper_summary(topic: str, paper: CompanyRecord) -> str:
     title = _paper_title(paper)
     abstract = _paper_abstract(paper)
-    sentences = _split_sentences(abstract)
-    first = sentences[0] if sentences else "No abstract was available, so this summary is based on the paper title and metadata."
-    second = sentences[1] if len(sentences) > 1 else ""
-    third = sentences[2] if len(sentences) > 2 else ""
-    year = _paper_year(paper)
     authors = _paper_authors(paper)
+    year = _paper_year(paper)
     ref = _best_reference(paper)
+    nonpaper = _looks_like_nonpaper(paper)
+    focus = _infer_focus_label(title, abstract)
+    good_sentences = _best_context_sentences(abstract, limit=3)
+
+    if nonpaper:
+        quick = "This result does not clearly look like a single academic paper; it may be an index page, journal page, or commercial page related to the topic."
+    elif good_sentences:
+        quick = good_sentences[0]
+    else:
+        quick = f"This appears to be a {focus} related to {topic}, based mainly on the title and available metadata."
+
+    if len(good_sentences) >= 2:
+        takeaway = good_sentences[1]
+    else:
+        takeaway = _fallback_takeaway(topic, focus, bool(abstract), nonpaper)
+
+    evidence_bits = []
+    if abstract:
+        evidence_bits.append("abstract/context available")
+    if authors and authors.lower() != "unknown authors":
+        evidence_bits.append("authors listed")
+    if year:
+        evidence_bits.append(f"year {year}")
+    if ref and "doi.org/" in ref.lower():
+        evidence_bits.append("DOI linked")
+
+    if nonpaper:
+        quality = "low — likely not a standalone research paper"
+    elif abstract and ((authors and authors.lower() != "unknown authors") or year or "doi.org/" in ref.lower()):
+        quality = "medium/high — enough metadata for a useful quick review"
+    elif abstract:
+        quality = "medium — abstract available but metadata is limited"
+    else:
+        quality = "low — title-based review only"
 
     lines = [
-        f"Plain-English summary: {first}"
+        f"Quick review: {quick}",
+        f"Focus: {focus}.",
+        f"Main takeaway: {takeaway}",
+        f"Evidence quality: {quality}" + (f" ({', '.join(evidence_bits)})." if evidence_bits else "."),
     ]
-    if second:
-        lines.append(f"Method / context: {second}")
-    if third:
-        lines.append(f"Key takeaway: {third}")
-
-    if not second and abstract:
-        kws = _top_keywords([title, abstract], limit=4)
-        if kws:
-            lines.append(f"Likely focus areas: {', '.join(kws)}.")
-
-    lines.append(f"Why it matters for {topic}: This paper appears relevant to the topic because it addresses {topic} directly or provides supporting technical context.")
-    if authors and authors != 'Unknown authors':
-        lines.append(f"Authors: {authors}.")
-    if year:
-        lines.append(f"Year: {year}.")
     if ref:
         lines.append(f"Reference: {ref}")
 
     return "\n".join(lines).strip()
-
 
 
 def _builtin_topic_synthesis(topic: str, papers: List[CompanyRecord]) -> str:
@@ -433,29 +518,28 @@ def papers_to_feynman_context(
 
 def _build_per_paper_summary_prompt(topic: str, paper: CompanyRecord) -> str:
     """
-    Build a deterministic structured prompt for one paper summary.
+    Build a concise prompt for one-paper quick review.
     """
     title = _paper_title(paper)
     authors = _paper_authors(paper)
     year = _paper_year(paper)
     ref = _best_reference(paper)
-    abstract = _truncate(_paper_abstract(paper), 2500)
+    abstract = _truncate(_paper_abstract(paper), 2200)
 
     return f"""
-Summarize the following research paper for the topic: {topic}
+Write a very concise quick review of this paper for the topic: {topic}
 
-Return your answer in this exact structure:
+Return exactly four bullets in this format:
+- Quick review: ...
+- Focus: ...
+- Main takeaway: ...
+- Evidence quality: ...
 
-Title:
-One-line relevance:
-Plain-English summary:
-Main contribution:
-Method / model:
-Data / benchmark:
-Key findings:
-Limitations:
-Practical relevance:
-Confidence note:
+Rules:
+- Use only the title, abstract/context, and metadata provided below.
+- Do not invent experiments, datasets, benchmarks, or results.
+- If metadata is weak or this may not be a real paper page, say that explicitly.
+- Keep the whole answer under 90 words.
 
 Paper title: {title}
 Authors: {authors}
@@ -738,25 +822,25 @@ def enrich_papers_with_feynman(
         return papers, "Audit complete."
 
     if mode in {"paper_summaries", "summaries"}:
-        limit = min(len(papers), max(1, per_paper_limit))
-        engine_label = "Feynman" if use_feynman else "built-in summarizer"
-        _log(f"🔬 Summarizing {limit} papers with {engine_label}...")
-        for idx, paper in enumerate(papers[:limit], 1):
-            if use_feynman:
+        feynman_limit = min(len(papers), max(0, per_paper_limit))
+        if use_feynman and feynman_limit > 0:
+            _log(f"🔬 Creating quick reviews for all {len(papers)} papers (Feynman for top {feynman_limit}, fallback for the rest)...")
+        else:
+            _log(f"🔬 Creating quick reviews for all {len(papers)} papers with the built-in summarizer...")
+
+        for idx, paper in enumerate(papers, 1):
+            use_feynman_here = use_feynman and idx <= feynman_limit
+            if use_feynman_here:
                 result = run_feynman_paper_summary(topic, paper)
                 if result["success"] and result.get("output"):
                     paper.notes = result["output"]
-                    _log(f"  ✅ summarized {idx}/{limit}: {_paper_title(paper)[:60]}")
+                    _log(f"  ✅ quick review {idx}/{len(papers)} via Feynman: {_paper_title(paper)[:60]}")
                 else:
                     paper.notes = _builtin_single_paper_summary(topic, paper)
-                    _log(f"  ⚠️ Feynman failed, used fallback for {idx}/{limit}: {_paper_title(paper)[:60]}")
+                    _log(f"  ⚠️ fallback quick review {idx}/{len(papers)}: {_paper_title(paper)[:60]}")
             else:
                 paper.notes = _builtin_single_paper_summary(topic, paper)
-                _log(f"  ✅ summarized {idx}/{limit}: {_paper_title(paper)[:60]}")
-
-        for paper in papers[limit:]:
-            if not _safe_get(paper, "notes"):
-                paper.notes = ""
+                _log(f"  ✅ quick review {idx}/{len(papers)}: {_paper_title(paper)[:60]}")
 
         if include_global_synthesis:
             _log(f"🧠 Building combined {synthesis_mode} report...")
@@ -1105,7 +1189,11 @@ def auto_summarize_and_export(
         synthesis_mode=synthesis_mode,
     )
 
-    export_paths: Dict[str, str] = {"summary_engine": "feynman" if is_feynman_installed() else "built-in"}
+    if is_feynman_installed():
+        engine_label = "feynman+fallback" if len(papers) > max(0, per_paper_limit) else "feynman"
+    else:
+        engine_label = "built-in"
+    export_paths: Dict[str, str] = {"summary_engine": engine_label}
 
     md_path = export_research_summary_markdown(
         topic=topic,
