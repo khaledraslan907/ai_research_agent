@@ -253,7 +253,7 @@ with st.sidebar:
             ["auto","xlsx","csv","json","pdf"], index=0)
         export_filename = st.text_input("Export filename", value="results")
         auto_summarize_papers = st.checkbox("Auto-summarize papers after search", value=True)
-        paper_summary_limit = st.number_input("Summarize top N papers", 1, 20, 5, step=1)
+        paper_summary_limit = st.number_input("Top N papers for richer Feynman summaries", 0, 20, 5, step=1, help="All papers will still get a quick review. This controls how many top papers receive the richer Feynman pass when available.")
         paper_synthesis_mode = st.selectbox(
             "Combined synthesis mode",
             ["lit", "deepresearch"],
@@ -649,12 +649,12 @@ if run_btn:
                 if summary_engine == "feynman":
                     st.success(
                         f"🧠 Automatic paper summaries ready · engine: Feynman · "
-                        f"{min(len(paper_records), int(paper_summary_limit))} paper summaries generated"
+                        f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} paper quick reviews generated"
                     )
                 else:
                     st.success(
                         f"🧠 Automatic paper summaries ready · engine: built-in fallback · "
-                        f"{min(len(paper_records), int(paper_summary_limit))} paper summaries generated"
+                        f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} paper quick reviews generated"
                     )
                 if paper_export_paths.get("pdf_error"):
                     st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
@@ -740,7 +740,7 @@ if run_btn:
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Papers found", len(paper_records))
-                c2.metric("Summaries created", min(len(paper_records), int(paper_summary_limit)))
+                c2.metric("Quick reviews ready", sum(1 for p in paper_records if getattr(p, "notes", "")))
                 c3.metric("PDF ready", "Yes" if paper_export_paths.get("pdf") else "No")
 
                 if paper_summary_report:
