@@ -793,153 +793,139 @@ if run_btn and prompt.strip():
     # ── Download tab ───────────────────────────────────────────────────────────
     with tab_download:
         st.markdown("### ⬇️ Download your results")
-        st.caption("Choose the format you want:")
+        st.caption("All formats are available at once — click any button to download without losing your session.")
+
+        import io
+
+        # Pre-compute all formats (avoids session reset on click)
+        try:
+            xl_buf = io.BytesIO()
+            df_display.to_excel(xl_buf, index=False, engine="openpyxl")
+            xl_bytes = xl_buf.getvalue()
+        except Exception:
+            xl_bytes = None
+
+        csv_bytes  = df_display.to_csv(index=False).encode("utf-8")
+        json_bytes = df_display.to_json(orient="records", indent=2).encode("utf-8")
+
+        ep = result.get("export_path", "")
+        pdf_bytes = None
+        if ep and Path(ep).exists() and ep.endswith(".pdf"):
+            with open(ep, "rb") as _pf:
+                pdf_bytes = _pf.read()
 
         dl_col1, dl_col2, dl_col3, dl_col4 = st.columns(4)
 
-        # Excel
-        try:
-            import io, openpyxl
-            xl_buf = io.BytesIO()
-            df_display.to_excel(xl_buf, index=False, engine="openpyxl")
-            xl_buf.seek(0)
+        if xl_bytes:
             dl_col1.download_button(
-                "📊 Excel (.xlsx)",
-                data=xl_buf,
+                "📊 Excel (.xlsx)", data=xl_bytes,
                 file_name=_normalize_filename(export_filename, "xlsx"),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
-        except Exception:
-            dl_col1.caption("Excel export unavailable (openpyxl missing)")
-
-        # CSV
-        csv_data = df_display.to_csv(index=False).encode("utf-8")
         dl_col2.download_button(
-            "📄 CSV (.csv)",
-            data=csv_data,
+            "📄 CSV (.csv)", data=csv_bytes,
             file_name=_normalize_filename(export_filename, "csv"),
-            mime="text/csv",
-            use_container_width=True,
+            mime="text/csv", use_container_width=True,
         )
-
-        # JSON
-        json_data = df_display.to_json(orient="records", indent=2).encode("utf-8")
         dl_col3.download_button(
-            "🔧 JSON (.json)",
-            data=json_data,
+            "🔧 JSON (.json)", data=json_bytes,
             file_name=_normalize_filename(export_filename, "json"),
-            mime="application/json",
-            use_container_width=True,
+            mime="application/json", use_container_width=True,
         )
-
-        # PDF (from agent export)
-        ep = result.get("export_path", "")
-        if ep and Path(ep).exists() and ep.endswith(".pdf"):
-            with open(ep, "rb") as pdf_f:
-                dl_col4.download_button(
-                    "📑 PDF",
-                    data=pdf_f,
-                    file_name=Path(ep).name,
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
+        if pdf_bytes:
+            dl_col4.download_button(
+                "📑 PDF", data=pdf_bytes,
+                file_name=Path(ep).name,
+                mime="application/pdf", use_container_width=True,
+            )
 
         st.divider()
-        st.markdown("**Preview of what you'll download:**")
         st.dataframe(df_display.head(5), use_container_width=True)
-        st.caption(f"Showing first 5 of {len(df_display)} rows.")
+        st.caption(f"Preview: first 5 of {len(df_display)} rows.")
 
     # ── AI Summaries tab (papers only) ───────────────────────────────────────
     if tab_summaries is not None:
         with tab_summaries:
-            from core.paper_summarizer import (
-                summarize_papers, summaries_to_markdown, summaries_to_text
-            )
+            from core.paper_summarizer import summaries_to_markdown, summaries_to_text
 
-            st.markdown("### 📝 AI Summaries")
-            st.caption(
-                "The AI reads each paper's abstract and writes a plain-English summary: "
-                "what it's about, key findings, and why it's relevant to your search."
-            )
+            st.markdown("### 📝 Paper Summaries")
+            st.caption("One plain-English summary per paper — what it found and why it matters.")
 
-            # Check LLM available
             if not backends:
-                st.warning(
-                    "⚠️ No LLM key found — summaries need a free Groq or Gemini key. "
-                    "Add one in the sidebar (takes 30 seconds to get)."
-                )
-                st.stop()
+                st.warning("⚠️ Add a free Groq key in the sidebar to enable summaries.")
+            else:
+                _sum_papers = [
+                    CompanyRecord(**r) for r in result.get("records", [])
+                    if r.get("description") and len(r.get("description", "")) > 50
+                ]
+                _sum_topic = task_spec.industry or "the topic"
+                st.info(f"**{len(_sum_papers)} papers** ready — click to generate summaries.")
 
-            _sum_papers = [
-                CompanyRecord(**r) for r in result.get("records", [])
-                if r.get("description") and len(r.get("description", "")) > 50
-            ]
-            st.info(f"**{len(_sum_papers)} papers** with abstracts ready to summarize.")
+                if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
+                    _sums = []
+                    _prog   = st.progress(0)
+                    _status = st.empty()
+                    for idx, paper in enumerate(_sum_papers):
+                        _status.caption(f"⏳ {idx+1}/{len(_sum_papers)}: {paper.company_name[:55]}...")
+                        _prog.progress((idx + 1) / max(len(_sum_papers), 1))
+                        _prompt = (
+                            f"You are a research assistant. Read this paper abstract and write a "
+                            f"concise, accurate summary for a practitioner in the field.\n\n"
+                            f"Paper: {paper.company_name or 'Untitled'}\n"
+                            f"Authors: {paper.authors or 'Unknown'}\n"
+                            f"Abstract: {(paper.description or '')[:1200]}\n\n"
+                            f"Write ONLY:\n"
+                            f"**Summary:** 2-3 sentences explaining what the paper actually studied "
+                            f"and what it found, in plain English.\n"
+                            f"**Key result:** The single most important number, method, or conclusion.\n"
+                            f"**Useful for:** Who should read this paper and why."
+                        )
+                        try:
+                            _s = (llm_client.generate(_prompt, timeout=35) or "").strip()
+                        except Exception as e:
+                            _s = f"Could not summarize: {e}"
+                        _sums.append({
+                            "title":   paper.company_name or "Untitled",
+                            "authors": paper.authors or "",
+                            "doi":     paper.doi or paper.website or "",
+                            "summary": _s,
+                        })
+                    _prog.empty()
+                    _status.empty()
+                    st.session_state["paper_summaries"] = _sums
+                    st.session_state["summaries_topic"] = _sum_topic
+                    st.success(f"✅ {len(_sums)} summaries ready — see below and download.")
 
-            if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
-                _summaries = []
-                _prog = st.progress(0)
-                _status = st.empty()
-                for idx, paper in enumerate(_sum_papers):
-                    _status.caption(f"⏳ Summarizing {idx+1}/{len(_sum_papers)}: {paper.company_name[:50]}...")
-                    _prog.progress((idx + 1) / len(_sum_papers))
-                    from core.paper_summarizer import SUMMARY_PROMPT
-                    prompt = SUMMARY_PROMPT.format(
-                        title    = paper.company_name or "Untitled",
-                        authors  = paper.authors or "Unknown",
-                        abstract = (paper.description or "")[:1500],
-                        topic    = task_spec.industry or "research topic",
-                    )
-                    try:
-                        summary = llm_client.generate(prompt, timeout=30) or "Could not generate summary."
-                    except Exception as e:
-                        summary = f"Error: {e}"
-                    _summaries.append({
-                        "title":   paper.company_name or "Untitled",
-                        "authors": paper.authors or "",
-                        "doi":     paper.doi or paper.website or "",
-                        "summary": summary.strip(),
-                        "error":   False,
-                    })
-                _prog.empty()
-                _status.empty()
-                st.session_state["paper_summaries"] = _summaries
-                st.session_state["summaries_topic"] = task_spec.industry or "research"
-                st.success(f"✅ {len(_summaries)} summaries generated")
-
-            # Show summaries if generated
-            if "paper_summaries" in st.session_state and st.session_state["paper_summaries"]:
+            # Always show summaries if they exist in session (survive tab switches)
+            if st.session_state.get("paper_summaries"):
                 _summaries = st.session_state["paper_summaries"]
                 _topic     = st.session_state.get("summaries_topic", "research")
 
-                # Display each summary as a card
                 for i, s in enumerate(_summaries, 1):
-                    with st.expander(f"📄 {i}. {s['title'][:80]}", expanded=(i == 1)):
-                        if s["authors"]:
-                            st.caption(f"👤 {s['authors']}")
-                        if s["doi"]:
-                            st.caption(f"🔗 {s['doi']}")
+                    with st.expander(f"📄 {i}. {s['title'][:75]}", expanded=(i == 1)):
+                        meta = []
+                        if s["authors"]: meta.append(f"👤 {s['authors']}")
+                        if s["doi"]:     meta.append(f"🔗 [{s['doi'][:60]}]({s['doi']})")
+                        if meta: st.caption("  ·  ".join(meta))
                         st.markdown(s["summary"])
+
+                # Pre-compute download bytes once
+                _md_bytes  = summaries_to_markdown(_summaries, _topic).encode("utf-8")
+                _txt_bytes = summaries_to_text(_summaries, _topic).encode("utf-8")
+                _fn        = _topic[:30].replace(" ", "_")
 
                 st.divider()
                 st.markdown("**⬇️ Download all summaries:**")
-                dc1, dc2 = st.columns(2)
-
-                _md = summaries_to_markdown(_summaries, _topic)
-                dc1.download_button(
-                    "📝 Markdown (.md)",
-                    data=_md.encode("utf-8"),
-                    file_name=f"summaries_{_topic[:30].replace(' ','_')}.md",
-                    mime="text/markdown",
+                _sc1, _sc2 = st.columns(2)
+                _sc1.download_button(
+                    "📝 Markdown (.md)", data=_md_bytes,
+                    file_name=f"summaries_{_fn}.md", mime="text/markdown",
                     use_container_width=True,
                 )
-                _txt = summaries_to_text(_summaries, _topic)
-                dc2.download_button(
-                    "📄 Plain Text (.txt)",
-                    data=_txt.encode("utf-8"),
-                    file_name=f"summaries_{_topic[:30].replace(' ','_')}.txt",
-                    mime="text/plain",
+                _sc2.download_button(
+                    "📄 Text (.txt)", data=_txt_bytes,
+                    file_name=f"summaries_{_fn}.txt", mime="text/plain",
                     use_container_width=True,
                 )
 
