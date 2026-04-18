@@ -2,12 +2,7 @@
 paper_summarizer.py
 ====================
 Enhanced research-paper summarizer with PDF export.
-
-Improvements:
-- More detailed summary structure
-- Better practitioner-focused output
-- Detects likely non-paper pages (journal homepages, author guides, portals)
-- PDF export for summaries
+Safe for Streamlit Cloud import.
 """
 
 from __future__ import annotations
@@ -179,27 +174,6 @@ def summarize_papers(
     return results
 
 
-def summaries_to_markdown(summaries: List[Dict], topic: str) -> str:
-    lines = [
-        f"# Research Summaries: {topic}",
-        f"*{len(summaries)} results summarized*",
-        "",
-    ]
-
-    for i, s in enumerate(summaries, 1):
-        lines += [
-            "---",
-            f"## {i}. {s.get('title', 'Untitled')}",
-        ]
-        if s.get("authors") and s["authors"] != "Unknown":
-            lines.append(f"**Authors:** {s['authors']}")
-        if s.get("doi"):
-            lines.append(f"**Source:** {s['doi']}")
-        lines += ["", s.get("summary", ""), ""]
-
-    return "\n".join(lines)
-
-
 def summaries_to_text(summaries: List[Dict], topic: str) -> str:
     lines = [f"RESEARCH SUMMARIES: {topic.upper()}", "=" * 60, ""]
 
@@ -219,8 +193,7 @@ def summaries_to_text(summaries: List[Dict], topic: str) -> str:
 def summaries_to_pdf_bytes(summaries: List[Dict], topic: str) -> bytes | None:
     """
     Returns PDF bytes using reportlab.
-    Install once if needed:
-        pip install reportlab
+    Safe fallback: returns None if reportlab is not installed.
     """
     try:
         from reportlab.lib.pagesizes import A4
