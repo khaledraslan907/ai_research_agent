@@ -79,12 +79,33 @@ def plan_queries(task_spec: TaskSpec, llm=None) -> Dict[str, List[SearchQuery]]:
 
 
 def _clean_topic(topic: str) -> str:
-    """Strip LLM hallucination 1-2 letter prefixes ('al ', 'a ') but keep valid acronyms."""
+    """
+    Clean topic string:
+    - Strip LLM hallucination 1-2 letter prefixes
+    - Strip trailing generic domain words when a specific term exists before them
+      e.g. "sucker rod pump petroleum" → "sucker rod pump"
+      e.g. "ESP petroleum engineering" → "ESP"
+    """
     t = (topic or "").strip()
+
+    # Strip 1-2 letter hallucination prefixes
     VALID_SHORT = {"ai", "bi", "it", "ml", "ar", "vr", "ev", "hl", "er", "hr", "iot", "esg"}
     m = re.match(r"^([a-z]{1,2})\s+(.+)", t, re.I)
     if m and m.group(1).lower() not in VALID_SHORT:
         t = m.group(2).strip()
+
+    # Strip trailing broad domain words when a specific term precedes them
+    # e.g. "sucker rod pump petroleum" → specific term is "sucker rod pump"
+    TRAILING_DOMAIN = {
+        "petroleum", "engineering", "industry", "sector", "field",
+        "science", "technology", "research", "studies", "journal",
+        "applications", "application",
+    }
+    words = t.split()
+    while len(words) > 1 and words[-1].lower() in TRAILING_DOMAIN:
+        words = words[:-1]
+    t = " ".join(words)
+
     return t.strip()
 
 
