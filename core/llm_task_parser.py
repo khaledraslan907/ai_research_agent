@@ -27,7 +27,6 @@ from core.task_models import (
 from core.geography import normalize_country_name, expand_region_name
 
 
-# Regions that should be expanded to country lists
 REGION_EXPANSIONS = {
     "europe": ["france", "germany", "united kingdom", "italy", "spain",
                "netherlands", "belgium", "switzerland", "norway", "sweden",
@@ -132,7 +131,6 @@ def _norm_spaces(text: str) -> str:
 
 
 def _expand_countries(country_list: list[str]) -> list[str]:
-    """Expand region names and normalise all country names."""
     expanded: list[str] = []
     for item in country_list:
         item_lower = item.lower().strip()
@@ -161,7 +159,6 @@ def _strip_broad_domain_tail(text: str) -> str:
     cleaned = _BROAD_DOMAIN_TAIL_RE.sub("", cleaned)
     cleaned = _norm_spaces(cleaned.strip(" -,:;|"))
 
-    # Also remove a trailing generic domain word if the phrase already has a specific head
     words = cleaned.split()
     while len(words) > 1 and " ".join(words[-2:]).lower() in {"oil gas", "oil & gas"}:
         words = words[:-2]
@@ -244,7 +241,6 @@ def _repair_topic(raw_prompt: str, topic: str, task_type: str) -> str:
 def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
     """Convert LLM JSON output → TaskSpec dataclass."""
 
-    # --- task type ---
     task_type = data.get("task_type", "entity_discovery")
     if task_type not in {
         "entity_discovery",
@@ -256,17 +252,14 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
     }:
         task_type = "entity_discovery"
 
-    # --- entity ---
     entity_type = data.get("entity_type", "company")
     entity_category = data.get("entity_category", "general")
     if entity_category not in {"service_company", "software_company", "general"}:
         entity_category = "general"
 
-    # --- topic ---
     raw_topic = (data.get("topic") or "").strip()
     topic = _repair_topic(raw_prompt, raw_topic, task_type)
 
-    # --- geography ---
     include_raw = data.get("include_countries", []) or []
     exclude_raw = data.get("exclude_countries", []) or []
     excpres_raw = data.get("exclude_presence_countries", []) or []
@@ -278,7 +271,6 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
     include_countries = [c for c in include_countries if c not in exclude_countries]
     strict_mode = bool(include_countries or exclude_countries or excpres_countries)
 
-    # --- attributes ---
     attrs_raw = data.get("attributes_wanted", []) or []
     valid_attrs = {
         "website", "email", "phone", "linkedin", "summary",
@@ -288,12 +280,10 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
     if "website" not in attributes:
         attributes = ["website"] + attributes
 
-    # --- output ---
     fmt = data.get("output_format", "xlsx")
     if fmt not in {"xlsx", "csv", "json", "pdf", "ui_table"}:
         fmt = "xlsx"
 
-    # --- max results ---
     max_results = int(data.get("max_results", 25))
     max_results = max(1, min(max_results, 500))
 
