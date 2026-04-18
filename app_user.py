@@ -12,16 +12,11 @@ Key fixes in this version:
 - Paper results table removes DOI and tries harder to recover Authors / Year
 """
 
-from __future__ import annotations
-
 import io
 import os
 import re
 import sys
 from pathlib import Path
-
-# ── allow running from project root ────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pandas as pd
 import streamlit as st
@@ -29,11 +24,20 @@ import streamlit as st
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
 from core.models import ProviderSettings, CompanyRecord
-from core.paper_summarizer import (
-    summarize_papers,
-    summaries_to_text,
-    summaries_to_pdf_bytes,
-)
+
+try:
+    from core.paper_summarizer import (
+        summarize_papers,
+        summaries_to_text,
+        summaries_to_pdf_bytes,
+    )
+except Exception:
+    # Safe fallback so the whole app does not crash on import
+    from core.paper_summarizer import summarize_papers, summaries_to_text
+
+    def summaries_to_pdf_bytes(summaries, topic):
+        return None
+
 from pipeline.orchestrator import SearchOrchestrator
 
 
