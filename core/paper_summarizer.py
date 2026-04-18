@@ -1,16 +1,18 @@
 """
 paper_summarizer.py
-====================
-Summarizes research papers using the free LLM already in the pipeline.
-No extra API keys needed — uses Groq/Gemini/Ollama chain.
+===================
+Summarizes research papers using the LLM already available in the app pipeline.
 
 Each summary contains:
   - Plain-English 3-sentence summary
   - Key findings (bullet points)
   - Relevance to the search topic
 """
+
 from __future__ import annotations
-from typing import List, Dict, Optional
+
+from typing import Dict, List
+
 from core.models import CompanyRecord
 
 
@@ -27,7 +29,8 @@ Write a summary with exactly this structure (keep it short):
 **Key findings:** (2-3 bullet points, each under 15 words)
 **Relevant because:** (1 sentence linking to "{topic}")
 
-Be concise. No preamble."""
+Be concise. No preamble.
+"""
 
 
 def summarize_papers(
@@ -38,37 +41,45 @@ def summarize_papers(
     progress_callback=None,
 ) -> List[Dict]:
     """
-    Generate a plain-English summary for each paper using the free LLM.
-    Returns list of dicts with: title, authors, doi, url, summary, error
+    Generate a plain-English summary for each paper using the provided LLM client.
+    Returns list of dicts with: title, authors, doi, summary, error
     """
-    results = []
-    papers  = [p for p in papers if p.description and len(p.description) > 50][:max_papers]
+    results: List[Dict] = []
 
-    if not papers:
+    filtered_papers = [
+        p for p in papers
+        if getattr(p, "description", None) and len((p.description or "").strip()) > 50
+    ][:max_papers]
+
+    if not filtered_papers:
         return []
 
-    for i, paper in enumerate(papers):
+    for i, paper in enumerate(filtered_papers):
+        title = (paper.company_name or "Untitled").strip()
+        authors = (paper.authors or "Unknown").strip()
+        abstract = (paper.description or "").strip()[:1500]
+        doi = (paper.doi or paper.website or "").strip()
+
         if progress_callback:
-            progress_callback(f"Summarizing {i+1}/{len(papers)}: {paper.company_name[:50]}...")
+            progress_callback(f"Summarizing {i + 1}/{len(filtered_papers)}: {title[:50]}...")
 
-        title    = paper.company_name or "Untitled"
-        authors  = paper.authors or "Unknown"
-        abstract = (paper.description or "")[:1500]   # cap to save tokens
-        doi      = paper.doi or paper.website or ""
-
-        if not abstract.strip():
-            results.append({
-                "title":   title,
-                "authors": authors,
-                "doi":     doi,
-                "summary": "No abstract available for this paper.",
-                "error":   False,
-            })
+        if not abstract:
+            results.append(
+                {
+                    "title": title,
+                    "authors": authors,
+                    "doi": doi,
+                    "summary": "No abstract available for this paper.",
+                    "error": False,
+                }
+            )
             continue
 
         prompt = SUMMARY_PROMPT.format(
-            title=title, authors=authors,
-            abstract=abstract, topic=topic,
+            title=title,
+            authors=authors,
+            abstract=abstract,
+            topic=topic,
         )
 
         try:
@@ -78,16 +89,18 @@ def summarize_papers(
                 summary = "Summary could not be generated (LLM returned empty response)."
             error = False
         except Exception as e:
-            summary = f"Summary error: {str(e)[:100]}"
-            error   = True
+            summary = f"Summary error: {str(e)[:200]}"
+            error = True
 
-        results.append({
-            "title":   title,
-            "authors": authors,
-            "doi":     doi,
-            "summary": summary,
-            "error":   error,
-        })
+        results.append(
+            {
+                "title": title,
+                "authors": authors,
+                "doi": doi,
+                "summary": summary,
+                "error": error,
+            }
+        )
 
     return results
 
@@ -99,29 +112,33 @@ def summaries_to_markdown(summaries: List[Dict], topic: str) -> str:
         f"*{len(summaries)} papers summarized*",
         "",
     ]
+
     for i, s in enumerate(summaries, 1):
         lines += [
-            f"---",
-            f"## {i}. {s['title']}",
+            "---",
+            f"## {i}. {s.get('title', 'Untitled')}",
         ]
-        if s["authors"] and s["authors"] != "Unknown":
+        if s.get("authors") and s["authors"] != "Unknown":
             lines.append(f"**Authors:** {s['authors']}")
-        if s["doi"]:
+        if s.get("doi"):
             lines.append(f"**Source:** {s['doi']}")
-        lines += ["", s["summary"], ""]
+        lines += ["", s.get("summary", ""), ""]
+
     return "\n".join(lines)
 
 
 def summaries_to_text(summaries: List[Dict], topic: str) -> str:
     """Plain text version for simple download."""
     lines = [f"RESEARCH SUMMARIES: {topic.upper()}", "=" * 60, ""]
+
     for i, s in enumerate(summaries, 1):
         lines += [
-            f"{i}. {s['title']}",
-            f"   Authors: {s['authors']}",
-            f"   Source:  {s['doi']}",
+            f"{i}. {s.get('title', 'Untitled')}",
+            f"   Authors: {s.get('authors', '')}",
+            f"   Source:  {s.get('doi', '')}",
             "",
-            f"   {s['summary'].replace(chr(10), chr(10)+'   ')}",
+            f"   {s.get('summary', '').replace(chr(10), chr(10) + '   ')}",
             "",
         ]
+
     return "\n".join(lines)
