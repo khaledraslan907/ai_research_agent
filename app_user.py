@@ -164,48 +164,6 @@ def _mask(key: str) -> str:
     return key[:4] + "•" * (len(key) - 8) + key[-4:]
 
 
-def _paper_attr(paper, *names: str) -> str:
-    for name in names:
-        try:
-            value = getattr(paper, name, "")
-        except Exception:
-            value = ""
-        if value is not None and str(value).strip() and str(value).strip().lower() != "nan":
-            return str(value)
-    return ""
-
-
-def _paper_rows_for_display(papers: list[CompanyRecord], source_rows: list[dict] | None = None) -> pd.DataFrame:
-    rows = []
-    source_rows = source_rows or []
-    for idx, paper in enumerate(papers):
-        src = source_rows[idx] if idx < len(source_rows) else {}
-        rows.append({
-            "Title": _paper_attr(paper, "company_name", "title"),
-            "Authors": _paper_attr(paper, "authors"),
-            "Year": _paper_attr(paper, "publication_year", "year"),
-            "DOI": _paper_attr(paper, "doi"),
-            "URL": _paper_attr(paper, "website", "source_url"),
-            "AI Summary": _paper_attr(paper, "notes"),
-            "Abstract": _paper_attr(paper, "description", "abstract", "summary"),
-            "Confidence": src.get("confidence_score", ""),
-            "Source Provider": src.get("source_provider", ""),
-        })
-    return pd.DataFrame(rows)
-
-
-def _file_bytes(path_str: str) -> bytes | None:
-    if not path_str:
-        return None
-    try:
-        path = Path(path_str)
-        if path.exists() and path.is_file():
-            return path.read_bytes()
-    except Exception:
-        return None
-    return None
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Key guidance content
 # ──────────────────────────────────────────────────────────────────────────────
@@ -292,8 +250,14 @@ MODE_PRESETS = {
 
 EXAMPLES = [
     ("🏢 Companies",  "Find oilfield service companies in Egypt and Saudi Arabia with email and phone"),
+    ("🏢 Companies",  "Find digital oil and gas software companies outside USA and Egypt with email"),
+    ("🏢 Companies",  "Find renewable energy companies in Germany and Norway with contact details"),
+    ("🏢 Companies",  "Find AI and data analytics companies in the energy sector outside USA"),
     ("📄 Papers",     "Find research papers about Electrical Submersible Pump with authors export as PDF"),
-    ("👥 LinkedIn",   "Find LinkedIn profiles of petroleum engineers in oil gas companies in Egypt")
+    ("📄 Papers",     "Find papers about asphaltene effect on ESP performance with authors as PDF"),
+    ("📄 Papers",     "Find papers about carbon capture CCS techniques export as CSV"),
+    ("👥 LinkedIn",   "Find LinkedIn profiles of petroleum engineers in oil gas companies in Egypt"),
+    ("👥 LinkedIn",   "Find HR managers and engineers on LinkedIn working in oilfield service companies in Saudi Arabia"),
 ]
 
 
@@ -455,13 +419,6 @@ with st.sidebar:
             ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)", "JSON (.json)"],
         )
         export_filename = st.text_input("Export filename", value="results")
-        paper_summary_limit = st.slider("Higher-quality Feynman summaries for top papers", 0, 10, 5, help="All papers will get a quick review. This controls how many top papers get the richer Feynman pass when available.")
-        paper_synthesis_label = st.selectbox(
-            "Paper summary depth",
-            ["Literature review (faster)", "Deep research (slower)"],
-            index=0,
-        )
-        export_summary_pdf = st.checkbox("Create PDF research brief for paper searches", value=True)
 
         st.caption("**Fields to collect:**")
         col1, col2 = st.columns(2)
@@ -751,60 +708,13 @@ if run_btn and prompt.strip():
     if "Score" in df_display.columns:
         df_display = df_display.sort_values("Score", ascending=False)
 
-    # ── TABS + AUTO PAPER SUMMARY ───────────────────────────────────────────
-    is_papers = task_spec.task_type == "document_research"
-    paper_records: list[CompanyRecord] = []
-    paper_display_df = pd.DataFrame()
-    paper_export_paths: dict[str, str] = {}
-    paper_summary_report = ""
-    paper_summary_error = ""
-    paper_synthesis_mode = "deepresearch" if paper_synthesis_label.startswith("Deep") else "lit"
-
-    if is_papers:
-        paper_records = [CompanyRecord(**r) for r in result.get("records", [])]
-        try:
-            from core.feynman_bridge import auto_summarize_and_export
-
-            summary_status = st.empty()
-            with st.spinner("🔬 Preparing automatic paper summaries and PDF brief..."):
-                def _paper_progress(msg: str):
-                    summary_status.caption(f"🔬 {msg}")
-
-                paper_records, paper_summary_report, paper_export_paths = auto_summarize_and_export(
-                    papers=paper_records,
-                    topic=task_spec.industry or prompt,
-                    export_dir="outputs",
-                    export_pdf=export_summary_pdf,
-                    per_paper_limit=int(paper_summary_limit),
-                    synthesis_mode=paper_synthesis_mode,
-                    progress_callback=_paper_progress,
-                )
-            summary_status.empty()
-            summary_engine = paper_export_paths.get("summary_engine", "built-in")
-            if summary_engine == "feynman":
-                st.success(
-                    f"🧠 Paper summary ready · engine: Feynman · "
-                    f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} quick reviews generated"
-                )
-            else:
-                st.success(
-                    f"🧠 Paper summary ready · engine: built-in fallback · "
-                    f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} quick reviews generated"
-                )
-            if paper_export_paths.get("pdf_error"):
-                st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
-        except Exception as exc:
-            paper_summary_error = f"Automatic paper summarization failed: {exc}"
-            st.warning(paper_summary_error)
-
-        paper_display_df = _paper_rows_for_display(paper_records, result.get("records", []))
-
     # ── TABS ─────────────────────────────────────────────────────────────────
     if is_papers:
-        tab_results, tab_summary, tab_download, tab_details = st.tabs([
+        tab_results, tab_summaries, tab_download, tab_feynman, tab_details = st.tabs([
             f"📊 Results ({total})",
-            "🧠 Summary",
+            "📝 AI Summaries",
             "⬇️ Download",
+            "🔬 Deep Research (Feynman)",
             "🔍 Search Details",
         ])
     else:
@@ -813,10 +723,12 @@ if run_btn and prompt.strip():
             "⬇️ Download",
             "🔍 Search Details",
         ])
-        tab_summary = None
+        tab_feynman  = None
+        tab_summaries = None
 
     # ── Results tab ────────────────────────────────────────────────────────────
     with tab_results:
+        # Cards view for people, table for others
         if is_people:
             st.markdown(f"**{total} LinkedIn profiles found**")
             for _, row in df_display.head(total).iterrows():
@@ -840,44 +752,32 @@ if run_btn and prompt.strip():
                 )
 
         elif is_papers:
-            st.markdown(f"**{len(paper_records)} papers found**")
-            if paper_summary_error:
-                st.caption("Showing paper results without automatic summaries.")
-
-            for _, row in paper_display_df.iterrows():
+            st.markdown(f"**{total} papers found**")
+            for _, row in df_display.iterrows():
                 title   = row.get("Title", "")
                 authors = row.get("Authors", "")
                 year    = row.get("Year", "")
                 doi     = row.get("DOI", "")
                 url     = row.get("URL", "")
-                summary = str(row.get("AI Summary", "") or "")[:420]
-                abstract = str(row.get("Abstract", "") or "")[:220]
+                abstract = str(row.get("Abstract", ""))[:250]
 
                 meta_parts = [p for p in [str(authors)[:80], str(year)] if p and p != "nan"]
                 meta = " · ".join(meta_parts)
                 link_ref = doi or url or ""
                 link_html = f'<a href="{link_ref}" target="_blank" class="result-link">🔗 View Paper</a>' if link_ref else ""
-                summary_html = (
-                    f'<div style="font-size:13px;color:#d7d9e2;margin:8px 0"><strong>AI Summary:</strong> {summary}{"..." if len(summary) == 420 else ""}</div>'
-                    if summary else ""
-                )
-                abstract_html = (
-                    f'<div style="font-size:12px;color:#5a6080;margin:6px 0">{abstract}{"..." if len(abstract) == 220 else ""}</div>'
-                    if abstract else ""
-                )
 
                 st.markdown(
                     f'<div class="result-card">'
                     f'<div class="result-name">📄 {title}</div>'
                     f'<div class="result-meta">{meta}</div>'
-                    f'{summary_html}'
-                    f'{abstract_html}'
+                    f'<div style="font-size:12px;color:#5a6080;margin:6px 0">{abstract}{"..." if len(abstract) == 250 else ""}</div>'
                     f'{link_html}'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
 
         else:
+            # Company table
             st.dataframe(
                 df_display,
                 use_container_width=True,
@@ -890,44 +790,18 @@ if run_btn and prompt.strip():
                 },
             )
 
-    if tab_summary is not None:
-        with tab_summary:
-            st.markdown("### 🧠 Automatic paper summary")
-            if paper_summary_error:
-                st.warning(paper_summary_error)
-            else:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Papers found", len(paper_records))
-                c2.metric("Quick reviews ready", sum(1 for p in paper_records if getattr(p, "notes", "")))
-                c3.metric("PDF ready", "Yes" if paper_export_paths.get("pdf") else "No")
-
-                st.info("Quick review summaries are attached to each paper below.")
-
-                if not paper_display_df.empty:
-                    st.dataframe(
-                        paper_display_df[[c for c in ["Title", "Authors", "Year", "AI Summary"] if c in paper_display_df.columns]],
-                        use_container_width=True,
-                        height=460,
-                    )
-
-                if paper_summary_report:
-                    with st.expander("Topic overview (optional combined synthesis)", expanded=False):
-                        st.markdown(paper_summary_report)
-
     # ── Download tab ───────────────────────────────────────────────────────────
     with tab_download:
         st.markdown("### ⬇️ Download your results")
         st.caption("Choose the format you want:")
 
-        dl_col1, dl_col2, dl_col3, dl_col4, dl_col5 = st.columns(5)
+        dl_col1, dl_col2, dl_col3, dl_col4 = st.columns(4)
 
-        export_df = paper_display_df if is_papers and not paper_display_df.empty else df_display
-
+        # Excel
         try:
-            import io
-            import openpyxl  # noqa: F401
+            import io, openpyxl
             xl_buf = io.BytesIO()
-            export_df.to_excel(xl_buf, index=False, engine="openpyxl")
+            df_display.to_excel(xl_buf, index=False, engine="openpyxl")
             xl_buf.seek(0)
             dl_col1.download_button(
                 "📊 Excel (.xlsx)",
@@ -939,62 +813,247 @@ if run_btn and prompt.strip():
         except Exception:
             dl_col1.caption("Excel export unavailable (openpyxl missing)")
 
+        # CSV
+        csv_data = df_display.to_csv(index=False).encode("utf-8")
         dl_col2.download_button(
             "📄 CSV (.csv)",
-            data=export_df.to_csv(index=False).encode("utf-8"),
+            data=csv_data,
             file_name=_normalize_filename(export_filename, "csv"),
             mime="text/csv",
             use_container_width=True,
         )
 
+        # JSON
+        json_data = df_display.to_json(orient="records", indent=2).encode("utf-8")
         dl_col3.download_button(
             "🔧 JSON (.json)",
-            data=export_df.to_json(orient="records", indent=2).encode("utf-8"),
+            data=json_data,
             file_name=_normalize_filename(export_filename, "json"),
             mime="application/json",
             use_container_width=True,
         )
 
-        md_bytes = _file_bytes(paper_export_paths.get("markdown", "")) if is_papers else None
-        if md_bytes:
-            dl_col4.download_button(
-                "📝 Summary (.md)",
-                data=md_bytes,
-                file_name=Path(paper_export_paths["markdown"]).name,
-                mime="text/markdown",
-                use_container_width=True,
-            )
-        elif not is_papers:
-            dl_col4.caption("Markdown summary only for paper searches")
-        else:
-            dl_col4.caption("Summary markdown not ready")
-
-        pdf_bytes = None
-        if is_papers:
-            pdf_bytes = _file_bytes(paper_export_paths.get("pdf", ""))
-        else:
-            ep = result.get("export_path", "")
-            if ep and Path(ep).exists() and ep.endswith(".pdf"):
-                pdf_bytes = Path(ep).read_bytes()
-        if pdf_bytes:
-            file_name = Path(paper_export_paths["pdf"]).name if is_papers and paper_export_paths.get("pdf") else _normalize_filename(export_filename, "pdf")
-            dl_col5.download_button(
-                "📑 PDF",
-                data=pdf_bytes,
-                file_name=file_name,
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        else:
-            dl_col5.caption("PDF not ready")
-
-        if is_papers and paper_export_paths.get("pdf_error"):
-            st.warning(f"PDF export note: {paper_export_paths['pdf_error']}")
+        # PDF (from agent export)
+        ep = result.get("export_path", "")
+        if ep and Path(ep).exists() and ep.endswith(".pdf"):
+            with open(ep, "rb") as pdf_f:
+                dl_col4.download_button(
+                    "📑 PDF",
+                    data=pdf_f,
+                    file_name=Path(ep).name,
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
 
         st.divider()
         st.markdown("**Preview of what you'll download:**")
-        st.dataframe(export_df.head(5), use_container_width=True)
-        st.caption(f"Showing first 5 of {len(export_df)} rows.")
+        st.dataframe(df_display.head(5), use_container_width=True)
+        st.caption(f"Showing first 5 of {len(df_display)} rows.")
+
+    # ── AI Summaries tab (papers only) ───────────────────────────────────────
+    if tab_summaries is not None:
+        with tab_summaries:
+            from core.paper_summarizer import (
+                summarize_papers, summaries_to_markdown, summaries_to_text
+            )
+
+            st.markdown("### 📝 AI Summaries")
+            st.caption(
+                "The AI reads each paper's abstract and writes a plain-English summary: "
+                "what it's about, key findings, and why it's relevant to your search."
+            )
+
+            # Check LLM available
+            if not backends:
+                st.warning(
+                    "⚠️ No LLM key found — summaries need a free Groq or Gemini key. "
+                    "Add one in the sidebar (takes 30 seconds to get)."
+                )
+                st.stop()
+
+            _sum_papers = [
+                CompanyRecord(**r) for r in result.get("records", [])
+                if r.get("description") and len(r.get("description", "")) > 50
+            ]
+            st.info(f"**{len(_sum_papers)} papers** with abstracts ready to summarize.")
+
+            if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
+                _summaries = []
+                _prog = st.progress(0)
+                _status = st.empty()
+                for idx, paper in enumerate(_sum_papers):
+                    _status.caption(f"⏳ Summarizing {idx+1}/{len(_sum_papers)}: {paper.company_name[:50]}...")
+                    _prog.progress((idx + 1) / len(_sum_papers))
+                    from core.paper_summarizer import SUMMARY_PROMPT
+                    prompt = SUMMARY_PROMPT.format(
+                        title    = paper.company_name or "Untitled",
+                        authors  = paper.authors or "Unknown",
+                        abstract = (paper.description or "")[:1500],
+                        topic    = task_spec.industry or "research topic",
+                    )
+                    try:
+                        summary = llm_client.generate(prompt, timeout=30) or "Could not generate summary."
+                    except Exception as e:
+                        summary = f"Error: {e}"
+                    _summaries.append({
+                        "title":   paper.company_name or "Untitled",
+                        "authors": paper.authors or "",
+                        "doi":     paper.doi or paper.website or "",
+                        "summary": summary.strip(),
+                        "error":   False,
+                    })
+                _prog.empty()
+                _status.empty()
+                st.session_state["paper_summaries"] = _summaries
+                st.session_state["summaries_topic"] = task_spec.industry or "research"
+                st.success(f"✅ {len(_summaries)} summaries generated")
+
+            # Show summaries if generated
+            if "paper_summaries" in st.session_state and st.session_state["paper_summaries"]:
+                _summaries = st.session_state["paper_summaries"]
+                _topic     = st.session_state.get("summaries_topic", "research")
+
+                # Display each summary as a card
+                for i, s in enumerate(_summaries, 1):
+                    with st.expander(f"📄 {i}. {s['title'][:80]}", expanded=(i == 1)):
+                        if s["authors"]:
+                            st.caption(f"👤 {s['authors']}")
+                        if s["doi"]:
+                            st.caption(f"🔗 {s['doi']}")
+                        st.markdown(s["summary"])
+
+                st.divider()
+                st.markdown("**⬇️ Download all summaries:**")
+                dc1, dc2 = st.columns(2)
+
+                _md = summaries_to_markdown(_summaries, _topic)
+                dc1.download_button(
+                    "📝 Markdown (.md)",
+                    data=_md.encode("utf-8"),
+                    file_name=f"summaries_{_topic[:30].replace(' ','_')}.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
+                _txt = summaries_to_text(_summaries, _topic)
+                dc2.download_button(
+                    "📄 Plain Text (.txt)",
+                    data=_txt.encode("utf-8"),
+                    file_name=f"summaries_{_topic[:30].replace(' ','_')}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+
+    # ── Feynman Deep Research tab (papers only) ──────────────────────────────
+    if tab_feynman is not None:
+        with tab_feynman:
+            from core.feynman_bridge import (
+                is_feynman_installed, get_feynman_version,
+                run_feynman_lit_review, run_feynman_deep_research,
+                run_feynman_review, run_feynman_audit,
+                papers_to_feynman_context, papers_to_doi_list,
+            )
+
+            st.markdown("### 🔬 Deep Research with Feynman")
+            st.caption(
+                "Feynman reads all papers you found, synthesises findings, "
+                "verifies citations, and writes a cited research brief. "
+                "It works on the papers your agent just found above."
+            )
+
+            _ok = is_feynman_installed()
+            if not _ok:
+                st.warning(
+                    "**Feynman is not installed.**\n\n"
+                    "**Windows (PowerShell as Administrator):**\n"
+                    "```powershell\nirm https://feynman.is/install.ps1 | iex\n```\n\n"
+                    "**macOS / Linux:**\n"
+                    "```bash\ncurl -fsSL https://feynman.is/install | bash\n```\n\n"
+                    "Then run `feynman setup` to configure your API key.  "
+                    "[Feynman docs →](https://www.feynman.is/docs/getting-started/installation)"
+                )
+            else:
+                st.success(f"✅ Feynman installed — version `{get_feynman_version()}`")
+
+            _papers = [
+                CompanyRecord(**r) for r in result.get("records", [])
+                if r.get("page_type") == "document" or r.get("doi") or r.get("authors")
+            ]
+            st.info(f"**{len(_papers)} papers** ready for deep analysis.")
+
+            with st.expander("📄 Preview papers being sent to Feynman", expanded=False):
+                st.code(
+                    papers_to_feynman_context(_papers, task_spec.industry or "topic", max_papers=8),
+                    language="text",
+                )
+
+            st.divider()
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("**📚 Literature Review** `feynman lit`")
+                st.caption("Consensus map + open questions. ~2–3 min.")
+                if st.button("Run Literature Review", key="u_feynman_lit", disabled=not _ok):
+                    with st.spinner("🔬 Running literature review..."):
+                        r2 = run_feynman_lit_review(task_spec.industry or "topic", _papers)
+                    if r2["success"]:
+                        st.success("Done")
+                        st.markdown(r2["output"])
+                        st.download_button("⬇️ Download", data=r2["output"],
+                            file_name="lit_review.md", mime="text/markdown")
+                    else:
+                        st.error(r2["error"])
+
+                st.markdown("**🧪 Peer Review** `feynman review`")
+                st.caption("Severity-graded critique + revision plan. ~2 min.")
+                if st.button("Run Peer Review", key="u_feynman_review", disabled=not _ok):
+                    with st.spinner("🔬 Simulating peer review..."):
+                        r2 = run_feynman_review(task_spec.industry or "topic", _papers)
+                    if r2["success"]:
+                        c = r2.get("severity_counts", {})
+                        st.success(f"Done — Critical:{c.get('critical',0)} Major:{c.get('major',0)} Minor:{c.get('minor',0)}")
+                        st.markdown(r2["output"])
+                    else:
+                        st.error(r2["error"])
+
+            with col2:
+                st.markdown("**🧠 Deep Research** `feynman deepresearch`")
+                st.caption("Full multi-agent: Researcher → Reviewer → Writer → Verifier. ~5–10 min.")
+                if st.button("Run Deep Research", key="u_feynman_deep", disabled=not _ok):
+                    with st.spinner("🧠 Multi-agent deep research running..."):
+                        r2 = run_feynman_deep_research(task_spec.industry or "topic", _papers)
+                    if r2["success"]:
+                        st.success("Done")
+                        st.markdown(r2["output"])
+                        st.download_button("⬇️ Download Brief", data=r2["output"],
+                            file_name=f"research_brief_{task_spec.industry or 'topic'}.md",
+                            mime="text/markdown")
+                    else:
+                        st.error(r2["error"])
+
+                st.markdown("**🔍 Claim Audit** `feynman audit`")
+                st.caption("Checks if paper code matches its claims. ~1 min/paper.")
+                if st.button("Audit Papers", key="u_feynman_audit", disabled=not _ok):
+                    prog = st.progress(0)
+                    audit_rows = []
+                    for idx, paper in enumerate(_papers[:10]):
+                        prog.progress((idx + 1) / min(len(_papers), 10))
+                        with st.spinner(f"Auditing {paper.company_name[:40]}..."):
+                            ar = run_feynman_audit(paper)
+                        audit_rows.append({
+                            "Title":  paper.company_name[:60],
+                            "Result": "⚠️ MISMATCH" if ar.get("is_mismatch") else ("✅ OK" if ar["success"] else "❓ N/A"),
+                        })
+                    prog.empty()
+                    st.dataframe(pd.DataFrame(audit_rows), use_container_width=True)
+
+            st.divider()
+            st.caption("Run these commands in your terminal for the same results:")
+            topic_safe = (task_spec.industry or "topic").replace('"', '')
+            doi_list = papers_to_doi_list(_papers)
+            cmd = f'feynman lit "{topic_safe}"\nfeynman deepresearch "{topic_safe}"'
+            if doi_list:
+                cmd += f"\nfeynman audit {doi_list[0]}"
+            st.code(cmd, language="bash")
 
     # ── Search details tab ────────────────────────────────────────────────────
     with tab_details:
