@@ -1,17 +1,18 @@
 """
 paper_summarizer.py
 ====================
-Enhanced research-paper summarizer.
+Enhanced research-paper summarizer with PDF export.
 
 Improvements:
 - More detailed summary structure
 - Better practitioner-focused output
 - Detects likely non-paper pages (journal homepages, author guides, portals)
-- Prevents wasting summary calls on weak results
+- PDF export for summaries
 """
 
 from __future__ import annotations
 
+import io
 import re
 from typing import Dict, List
 
@@ -81,7 +82,6 @@ def _looks_like_non_paper(title: str, abstract: str, doi_or_url: str) -> bool:
     if "for-authors" in d or "articles-in-press" in d:
         return True
 
-    # Very weak/generic descriptions are usually not individual papers
     if len(a) < 80 and any(x in t for x in {"journal", "onepetro", "sciengine"}):
         return True
 
@@ -180,7 +180,6 @@ def summarize_papers(
 
 
 def summaries_to_markdown(summaries: List[Dict], topic: str) -> str:
-    """Convert summaries list to a downloadable Markdown document."""
     lines = [
         f"# Research Summaries: {topic}",
         f"*{len(summaries)} results summarized*",
@@ -196,15 +195,12 @@ def summaries_to_markdown(summaries: List[Dict], topic: str) -> str:
             lines.append(f"**Authors:** {s['authors']}")
         if s.get("doi"):
             lines.append(f"**Source:** {s['doi']}")
-        if s.get("skipped"):
-            lines.append(f"**Skipped:** {s['skipped']}")
         lines += ["", s.get("summary", ""), ""]
 
     return "\n".join(lines)
 
 
 def summaries_to_text(summaries: List[Dict], topic: str) -> str:
-    """Plain text version for simple download."""
     lines = [f"RESEARCH SUMMARIES: {topic.upper()}", "=" * 60, ""]
 
     for i, s in enumerate(summaries, 1):
@@ -218,3 +214,78 @@ def summaries_to_text(summaries: List[Dict], topic: str) -> str:
         ]
 
     return "\n".join(lines)
+
+
+def summaries_to_pdf_bytes(summaries: List[Dict], topic: str) -> bytes | None:
+    """
+    Returns PDF bytes using reportlab.
+    Install once if needed:
+        pip install reportlab
+    """
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+    except Exception:
+        return None
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=36,
+        bottomMargin=36,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    head_style = styles["Heading2"]
+    body_style = ParagraphStyle(
+        "Body",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        alignment=TA_LEFT,
+        spaceAfter=8,
+    )
+    small_style = ParagraphStyle(
+        "Small",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=12,
+        alignment=TA_LEFT,
+        spaceAfter=6,
+    )
+
+    story = [
+        Paragraph(f"Research Summaries: {topic}", title_style),
+        Spacer(1, 10),
+        Paragraph(f"{len(summaries)} results summarized", small_style),
+        Spacer(1, 14),
+    ]
+
+    for i, s in enumerate(summaries, 1):
+        story.append(Paragraph(f"{i}. {s.get('title', 'Untitled')}", head_style))
+        if s.get("authors") and s["authors"] != "Unknown":
+            story.append(Paragraph(f"<b>Authors:</b> {s['authors']}", small_style))
+        if s.get("doi"):
+            story.append(Paragraph(f"<b>Source:</b> {s['doi']}", small_style))
+
+        summary_html = (
+            s.get("summary", "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\n", "<br/>")
+        )
+        story.append(Paragraph(summary_html, body_style))
+        story.append(Spacer(1, 12))
+
+        if i < len(summaries):
+            story.append(PageBreak())
+
+    doc.build(story)
+    return buf.getvalue()
