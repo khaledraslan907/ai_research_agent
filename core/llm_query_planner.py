@@ -200,7 +200,6 @@ def _clean_topic(topic: str, raw_prompt: str = "") -> str:
     """
     t = _norm_spaces(topic)
 
-    # Strip 1-2 letter hallucination prefixes
     valid_short = {"ai", "bi", "it", "ml", "ar", "vr", "ev", "hl", "er", "hr", "iot", "esg"}
     m = re.match(r"^([a-z]{1,2})\s+(.+)", t, re.I)
     if m and m.group(1).lower() not in valid_short:
