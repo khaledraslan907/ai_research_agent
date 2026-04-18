@@ -1,38 +1,36 @@
 """
-app_user.py  —  AI Research Agent  (user-facing / deployable version)
-=====================================================================
-Designed for Streamlit Cloud deployment.
+app_user.py — AI Research Agent (updated)
+========================================
 
-Key fixes in this version:
-- Search results, task metadata, and summaries are stored in st.session_state
-- Summary generation no longer makes the results disappear
-- Summary page stays selected after rerun (radio-based sections instead of st.tabs)
-- Paper results download uses Excel / CSV / PDF
-- Summary download uses TXT / PDF
-- Paper results table removes DOI and tries harder to recover Authors / Year
+Main fixes in this version:
+- Preserves and displays company category clearly (e.g. digital/software companies)
+- Treats prompts like 'operate outside Egypt and USA' as presence exclusion in the app layer
+- Adds an app-side refinement filter to remove obvious non-company results from the final display/export
+- Shows a richer 'what the agent understood' summary
+- Keeps paper summaries and downloads from the original app flow
 """
+
+from __future__ import annotations
 
 import io
 import os
 import re
-import sys
-from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
 
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
-from core.models import ProviderSettings, CompanyRecord
+from core.models import CompanyRecord, ProviderSettings
 
 try:
     from core.paper_summarizer import (
         summarize_papers,
-        summaries_to_text,
         summaries_to_pdf_bytes,
+        summaries_to_text,
     )
 except Exception:
-    # Safe fallback so the whole app does not crash on import
     from core.paper_summarizer import summarize_papers, summaries_to_text
 
     def summaries_to_pdf_bytes(summaries, topic):
@@ -42,7 +40,7 @@ from pipeline.orchestrator import SearchOrchestrator
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Streamlit page
+# Page setup
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Research Agent",
@@ -51,106 +49,50 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Session state ────────────────────────────────────────────────────────────
-if "search_result" not in st.session_state:
-    st.session_state["search_result"] = None
-
-if "task_meta" not in st.session_state:
-    st.session_state["task_meta"] = None
-
-if "paper_summaries" not in st.session_state:
-    st.session_state["paper_summaries"] = []
-
-if "summaries_topic" not in st.session_state:
-    st.session_state["summaries_topic"] = ""
-
-if "prompt_value" not in st.session_state:
-    st.session_state["prompt_value"] = ""
-
-if "active_section" not in st.session_state:
-    st.session_state["active_section"] = "results"
+for key, default in {
+    "search_result": None,
+    "task_meta": None,
+    "paper_summaries": [],
+    "summaries_topic": "",
+    "prompt_value": "",
+    "active_section": "results",
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
-# ── Custom CSS — refined dark-industrial aesthetic ────────────────────────────
 st.markdown(
     """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-}
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .stApp { background: #0f1117; color: #e8eaf0; }
-
 h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; letter-spacing: -0.02em; }
-
 .result-card {
-    background: #1a1d27;
-    border: 1px solid #2d3148;
-    border-radius: 10px;
-    padding: 18px 22px;
-    margin-bottom: 12px;
-    transition: border-color 0.2s;
+    background: #1a1d27; border: 1px solid #2d3148; border-radius: 10px;
+    padding: 18px 22px; margin-bottom: 12px;
 }
 .result-card:hover { border-color: #4f6ef7; }
-
 .result-name {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 15px;
-    font-weight: 600;
-    color: #ffffff;
-    margin-bottom: 4px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 15px; font-weight: 600;
+    color: #ffffff; margin-bottom: 4px;
 }
-.result-meta {
-    font-size: 13px;
-    color: #7b8099;
-    margin-bottom: 6px;
-}
-.result-link {
-    font-size: 13px;
-    color: #4f6ef7;
-    text-decoration: none;
-}
+.result-meta { font-size: 13px; color: #7b8099; margin-bottom: 6px; }
+.result-link { font-size: 13px; color: #4f6ef7; text-decoration: none; }
 .tag {
-    display: inline-block;
-    background: #1e2236;
-    border: 1px solid #363d5c;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 11px;
-    font-family: 'IBM Plex Mono', monospace;
-    color: #8892b0;
-    margin-right: 6px;
+    display: inline-block; background: #1e2236; border: 1px solid #363d5c;
+    border-radius: 4px; padding: 2px 8px; font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace; color: #8892b0; margin-right: 6px;
 }
 .key-step {
-    background: #151823;
-    border-left: 3px solid #4f6ef7;
-    border-radius: 0 8px 8px 0;
-    padding: 12px 16px;
-    margin: 8px 0;
-    font-size: 13px;
+    background: #151823; border-left: 3px solid #4f6ef7;
+    border-radius: 0 8px 8px 0; padding: 12px 16px; margin: 8px 0; font-size: 13px;
 }
 .key-step a { color: #4f6ef7; }
-.metric-row { display: flex; gap: 16px; margin: 8px 0; }
-.metric-box {
-    background: #1a1d27;
-    border: 1px solid #2d3148;
-    border-radius: 8px;
-    padding: 10px 16px;
-    flex: 1;
-    text-align: center;
-}
-.metric-num { font-family: 'IBM Plex Mono', monospace; font-size: 24px; font-weight: 600; }
-.metric-lbl { font-size: 11px; color: #7b8099; text-transform: uppercase; letter-spacing: 0.05em; }
 .section-header {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: #4f6ef7;
-    margin: 20px 0 8px 0;
-    padding-bottom: 6px;
-    border-bottom: 1px solid #2d3148;
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: #4f6ef7; margin: 20px 0 8px 0;
+    padding-bottom: 6px; border-bottom: 1px solid #2d3148;
 }
 </style>
 """,
@@ -159,370 +101,15 @@ h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; letter-spacing: -0.02em; }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Secrets helpers — read from st.secrets then fall back to env
+# Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def _secret(key: str, default: str = "") -> str:
-    """Read from st.secrets first, then env, then default."""
     try:
         return st.secrets.get(key, "") or os.getenv(key, default)
     except Exception:
         return os.getenv(key, default)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
-def _read_file(file) -> pd.DataFrame | None:
-    if file is None:
-        return None
-    try:
-        return pd.read_csv(file) if file.name.lower().endswith(".csv") else pd.read_excel(file)
-    except Exception:
-        return None
-
-
-def _normalize_filename(name: str, fmt: str) -> str:
-    ext_map = {"xlsx": ".xlsx", "csv": ".csv", "pdf": ".pdf", "json": ".json"}
-    desired_ext = ext_map.get(fmt, ".xlsx")
-    name = (name or "results").strip()
-
-    for ext in ext_map.values():
-        if name.lower().endswith(ext):
-            name = name[: -len(ext)]
-            break
-
-    return name + desired_ext
-
-
-def _mask(key: str) -> str:
-    if not key or len(key) < 8:
-        return ""
-    return key[:4] + "•" * (len(key) - 8) + key[-4:]
-
-
-def _is_blank(value) -> bool:
-    if value is None:
-        return True
-    try:
-        if pd.isna(value):
-            return True
-    except Exception:
-        pass
-    s = str(value).strip()
-    return s == "" or s.lower() in {"nan", "none", "null"}
-
-
-def _clean_text(value) -> str:
-    return "" if _is_blank(value) else str(value).strip()
-
-
-def _first_nonempty(record: dict, keys: list[str]) -> str:
-    for key in keys:
-        if key in record and not _is_blank(record.get(key)):
-            return _clean_text(record.get(key))
-    return ""
-
-
-def _parse_year(value) -> str:
-    if _is_blank(value):
-        return ""
-    s = str(value).strip()
-
-    try:
-        f = float(s)
-        if 1900 <= int(f) <= 2100:
-            return str(int(f))
-    except Exception:
-        pass
-
-    m = re.search(r"\b(19|20)\d{2}\b", s)
-    return m.group(0) if m else ""
-
-
-def _normalize_paper_records(records: list[dict]) -> pd.DataFrame:
-    """
-    Build a robust paper dataframe from many possible field names.
-    DOI removed intentionally.
-    """
-    rows = []
-
-    for r in records:
-        title = _first_nonempty(r, [
-            "company_name", "title", "paper_title", "document_title", "name"
-        ])
-
-        authors = _first_nonempty(r, [
-            "authors", "author", "paper_authors", "creators", "creator"
-        ])
-
-        year = _parse_year(_first_nonempty(r, [
-            "publication_year", "year", "published_year",
-            "publication_date", "published_date", "date"
-        ]))
-
-        abstract = _first_nonempty(r, [
-            "description", "abstract", "summary", "snippet", "paper_abstract"
-        ])
-
-        url = _first_nonempty(r, [
-            "website", "url", "paper_url", "source_url", "link"
-        ])
-
-        rows.append(
-            {
-                "Title": title,
-                "Authors": authors,
-                "Year": year,
-                "Abstract": abstract,
-                "URL": url,
-            }
-        )
-
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        return pd.DataFrame(columns=["Title", "Abstract", "URL"])
-
-    keep_cols = []
-    for c in df.columns:
-        nonempty = df[c].astype(str).str.strip().replace({"nan": "", "None": ""})
-        if c in {"Title", "Abstract", "URL"} or (nonempty != "").any():
-            keep_cols.append(c)
-
-    return df[keep_cols].copy()
-
-
-def _safe_pdf_text(value, max_len: int = 350) -> str:
-    text = _clean_text(value)
-    text = re.sub(r"\s+", " ", text)
-    if len(text) > max_len:
-        text = text[: max_len - 3] + "..."
-    return text
-
-
-def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results", is_papers: bool = False) -> bytes | None:
-    """
-    Returns PDF bytes using reportlab.
-
-    For paper results:
-      - uses a readable report layout (one paper per block)
-    For non-paper results:
-      - uses an improved wrapped table
-    """
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.enums import TA_LEFT
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.platypus import (
-            SimpleDocTemplate,
-            Paragraph,
-            Spacer,
-            Table,
-            TableStyle,
-            PageBreak,
-        )
-    except Exception:
-        return None
-
-    if df is None or df.empty:
-        return None
-
-    def _pdf_escape(text: str) -> str:
-        return (
-            str(text or "")
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-
-    def _clean_cell(value, max_len: int = 1200) -> str:
-        text = _clean_text(value)
-        text = re.sub(r"\s+", " ", text).strip()
-        if len(text) > max_len:
-            text = text[: max_len - 3] + "..."
-        return text
-
-    styles = getSampleStyleSheet()
-    title_style = styles["Title"]
-    heading_style = styles["Heading2"]
-
-    meta_style = ParagraphStyle(
-        "Meta",
-        parent=styles["BodyText"],
-        fontSize=9,
-        leading=11,
-        spaceAfter=4,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor("#333333"),
-    )
-
-    body_style = ParagraphStyle(
-        "Body",
-        parent=styles["BodyText"],
-        fontSize=10,
-        leading=14,
-        spaceAfter=8,
-        alignment=TA_LEFT,
-    )
-
-    link_style = ParagraphStyle(
-        "Link",
-        parent=styles["BodyText"],
-        fontSize=8,
-        leading=10,
-        spaceAfter=10,
-        alignment=TA_LEFT,
-        textColor=colors.HexColor("#1a4f7a"),
-    )
-
-    # ── PAPER REPORT LAYOUT ────────────────────────────────────────────────
-    if is_papers or {"Title", "Abstract"}.issubset(set(df.columns)):
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(
-            buf,
-            pagesize=A4,
-            leftMargin=36,
-            rightMargin=36,
-            topMargin=36,
-            bottomMargin=36,
-        )
-
-        story = [
-            Paragraph(_pdf_escape(title), title_style),
-            Spacer(1, 10),
-            Paragraph(f"{len(df)} results", meta_style),
-            Spacer(1, 12),
-        ]
-
-        for i, (_, row) in enumerate(df.iterrows(), start=1):
-            paper_title = _clean_cell(row.get("Title", ""), 300)
-            authors = _clean_cell(row.get("Authors", ""), 250) if "Authors" in df.columns else ""
-            year = _clean_cell(row.get("Year", ""), 20) if "Year" in df.columns else ""
-            abstract = _clean_cell(row.get("Abstract", ""), 2500)
-            url = _clean_cell(row.get("URL", ""), 400) if "URL" in df.columns else ""
-
-            if not paper_title and not abstract and not url:
-                continue
-
-            story.append(Paragraph(f"{i}. {_pdf_escape(paper_title or 'Untitled')}", heading_style))
-
-            meta_parts = []
-            if authors:
-                meta_parts.append(f"<b>Authors:</b> {_pdf_escape(authors)}")
-            if year:
-                meta_parts.append(f"<b>Year:</b> {_pdf_escape(year)}")
-            if meta_parts:
-                story.append(Paragraph(" &nbsp;&nbsp; ".join(meta_parts), meta_style))
-
-            if abstract:
-                story.append(Paragraph(f"<b>Abstract:</b> {_pdf_escape(abstract)}", body_style))
-
-            if url:
-                story.append(Paragraph(f"<b>URL:</b> {_pdf_escape(url)}", link_style))
-
-            story.append(Spacer(1, 10))
-
-            # Add page break every 3 papers for readability
-            if i < len(df) and i % 3 == 0:
-                story.append(PageBreak())
-
-        doc.build(story)
-        return buf.getvalue()
-
-    # ── IMPROVED TABLE LAYOUT FOR NON-PAPER RESULTS ────────────────────────
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=landscape(A4),
-        leftMargin=24,
-        rightMargin=24,
-        topMargin=24,
-        bottomMargin=24,
-    )
-
-    story = [
-        Paragraph(_pdf_escape(title), title_style),
-        Spacer(1, 10),
-        Paragraph(f"{len(df)} results", meta_style),
-        Spacer(1, 10),
-    ]
-
-    pdf_df = df.copy()
-
-    # Convert all cells to wrapped Paragraph objects
-    wrapped_header = []
-    wrapped_rows = []
-
-    table_header_style = ParagraphStyle(
-        "TableHeader",
-        parent=styles["BodyText"],
-        fontSize=8,
-        leading=10,
-        alignment=TA_LEFT,
-        textColor=colors.black,
-    )
-
-    table_cell_style = ParagraphStyle(
-        "TableCell",
-        parent=styles["BodyText"],
-        fontSize=7,
-        leading=9,
-        alignment=TA_LEFT,
-    )
-
-    for col in pdf_df.columns:
-        wrapped_header.append(Paragraph(f"<b>{_pdf_escape(col)}</b>", table_header_style))
-
-    for _, row in pdf_df.iterrows():
-        wrapped_row = []
-        for col in pdf_df.columns:
-            cell_text = _clean_cell(row[col], 500)
-            wrapped_row.append(Paragraph(_pdf_escape(cell_text), table_cell_style))
-        wrapped_rows.append(wrapped_row)
-
-    table_data = [wrapped_header] + wrapped_rows[:200]
-
-    ncols = len(pdf_df.columns)
-    if ncols <= 3:
-        col_widths = [180, 280, 220][:ncols]
-    elif ncols == 4:
-        col_widths = [140, 180, 240, 160]
-    else:
-        usable_width = 780
-        col_widths = [usable_width / ncols] * ncols
-
-    table = Table(table_data, repeatRows=1, colWidths=col_widths)
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e2f3")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
-
-    story.append(table)
-
-    if len(pdf_df) > 200:
-        story.append(Spacer(1, 10))
-        story.append(Paragraph("Note: PDF includes first 200 rows only.", meta_style))
-
-    doc.build(story)
-    return buf.getvalue()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Key guidance content
-# ──────────────────────────────────────────────────────────────────────────────
 KEY_GUIDE = {
     "groq": {
         "label": "Groq API Key",
@@ -583,19 +170,6 @@ KEY_GUIDE = {
     },
 }
 
-
-def _show_key_guide(key_id: str):
-    g = KEY_GUIDE[key_id]
-    st.markdown(f"**{g['icon']} {g['label']}** — {g['cost']}")
-    for action, url, text in g["steps"]:
-        link = f'<a href="{url}" target="_blank">{text}</a>' if url else text
-        st.markdown(f'<div class="key-step">→ {action} {link}</div>', unsafe_allow_html=True)
-    st.caption(f"💡 {g['why']}")
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Mode presets
-# ──────────────────────────────────────────────────────────────────────────────
 MODE_PRESETS = {
     "🚀 Fast": {"mode": "Fast", "max": 15, "desc": "~15 sec · DDG only · quick check"},
     "⚖️ Balanced": {"mode": "Balanced", "max": 40, "desc": "~1–2 min · best quality/speed ratio · recommended"},
@@ -615,91 +189,401 @@ EXAMPLES = [
 ]
 
 
+def _show_key_guide(key_id: str):
+    g = KEY_GUIDE[key_id]
+    st.markdown(f"**{g['icon']} {g['label']}** — {g['cost']}")
+    for action, url, text in g["steps"]:
+        link = f'<a href="{url}" target="_blank">{text}</a>' if url else text
+        st.markdown(f'<div class="key-step">→ {action} {link}</div>', unsafe_allow_html=True)
+    st.caption(f"💡 {g['why']}")
+
+
+def _read_file(file) -> pd.DataFrame | None:
+    if file is None:
+        return None
+    try:
+        return pd.read_csv(file) if file.name.lower().endswith(".csv") else pd.read_excel(file)
+    except Exception:
+        return None
+
+
+def _normalize_filename(name: str, fmt: str | None) -> str:
+    ext_map = {"xlsx": ".xlsx", "csv": ".csv", "pdf": ".pdf", "json": ".json", None: ".xlsx"}
+    desired_ext = ext_map.get(fmt, ".xlsx")
+    name = (name or "results").strip()
+    for ext in [".xlsx", ".csv", ".pdf", ".json"]:
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return name + desired_ext
+
+
+def _mask(key: str) -> str:
+    if not key or len(key) < 8:
+        return ""
+    return key[:4] + "•" * (len(key) - 8) + key[-4:]
+
+
+def _is_blank(value) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    s = str(value).strip()
+    return s == "" or s.lower() in {"nan", "none", "null"}
+
+
+def _clean_text(value) -> str:
+    return "" if _is_blank(value) else str(value).strip()
+
+
+def _normalize_prompt_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _first_nonempty(record: dict, keys: list[str]) -> str:
+    for key in keys:
+        if key in record and not _is_blank(record.get(key)):
+            return _clean_text(record.get(key))
+    return ""
+
+
+def _parse_year(value) -> str:
+    if _is_blank(value):
+        return ""
+    s = str(value).strip()
+    try:
+        f = float(s)
+        if 1900 <= int(f) <= 2100:
+            return str(int(f))
+    except Exception:
+        pass
+    m = re.search(r"\b(19|20)\d{2}\b", s)
+    return m.group(0) if m else ""
+
+
+def _title_list(items: list[str]) -> list[str]:
+    out = []
+    for item in items or []:
+        s = str(item).strip()
+        if s:
+            out.append(s.title())
+    return out
+
+
+def _humanize_task_type(task_type: str) -> str:
+    return {
+        "entity_discovery": "🏢 Companies",
+        "document_research": "📄 Research Papers",
+        "people_search": "👥 LinkedIn Profiles",
+        "market_research": "📊 Market Research",
+        "entity_enrichment": "🧩 Entity Enrichment",
+        "similar_entity_expansion": "🧭 Similar Entities",
+    }.get(task_type, "🔍 Entities")
+
+
+def _humanize_target_category(category: str) -> str:
+    return {
+        "software_company": "Digital / software companies",
+        "service_company": "Service / engineering companies",
+        "general": "General companies",
+    }.get((category or "").strip(), (category or "general").replace("_", " ").title())
+
+
+_DIGITAL_CATEGORY_HINTS = (
+    "digital", "software", "saas", "platform", "analytics", "automation",
+    "ai", "artificial intelligence", "machine learning", "data", "iot",
+    "scada", "cloud", "tech company", "technology company", "technology vendor",
+)
+
+_PRESENCE_OUTSIDE_PATTERNS = [
+    r"\boperate(?:s|d|ing)?\s+outside\b",
+    r"\bwork(?:s|ed|ing)?\s+outside\b",
+    r"\bserv(?:e|es|ed|ing)\s+outside\b",
+    r"\bactive\s+outside\b",
+    r"\bpresent\s+outside\b",
+]
+
+
+def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
+    prompt_lower = _normalize_prompt_text(prompt)
+
+    if getattr(task_spec, "task_type", "") in {
+        "entity_discovery", "market_research", "similar_entity_expansion", "entity_enrichment"
+    }:
+        if any(hint in prompt_lower for hint in _DIGITAL_CATEGORY_HINTS):
+            task_spec.target_category = "software_company"
+
+    geo = getattr(task_spec, "geography", None)
+    if geo is not None:
+        has_presence_outside = any(re.search(pat, prompt_lower) for pat in _PRESENCE_OUTSIDE_PATTERNS)
+        if has_presence_outside and getattr(geo, "exclude_countries", None) and not getattr(geo, "exclude_presence_countries", None):
+            geo.exclude_presence_countries = sorted(set(list(geo.exclude_countries or [])))
+
+        geo.strict_mode = bool(
+            list(getattr(geo, "include_countries", []) or [])
+            or list(getattr(geo, "exclude_countries", []) or [])
+            or list(getattr(geo, "exclude_presence_countries", []) or [])
+        )
+
+    return task_spec
+
+
+def _normalize_paper_records(records: list[dict]) -> pd.DataFrame:
+    rows = []
+    for r in records:
+        rows.append(
+            {
+                "Title": _first_nonempty(r, ["company_name", "title", "paper_title", "document_title", "name"]),
+                "Authors": _first_nonempty(r, ["authors", "author", "paper_authors", "creators", "creator"]),
+                "Year": _parse_year(_first_nonempty(r, [
+                    "publication_year", "year", "published_year", "publication_date", "published_date", "date"
+                ])),
+                "Abstract": _first_nonempty(r, ["description", "abstract", "summary", "snippet", "paper_abstract"]),
+                "URL": _first_nonempty(r, ["website", "url", "paper_url", "source_url", "link"]),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["Title", "Abstract", "URL"])
+
+    keep_cols = []
+    for c in df.columns:
+        nonempty = df[c].astype(str).str.strip().replace({"nan": "", "None": ""})
+        if c in {"Title", "Abstract", "URL"} or (nonempty != "").any():
+            keep_cols.append(c)
+    return df[keep_cols].copy()
+
+
+_BAD_HOST_HINTS = [
+    "wikipedia.org", "facebook.com", "instagram.com", "youtube.com", "x.com",
+    "twitter.com", "companiesmarketcap.com", "worldpopulationreview.com",
+    "alamy.com", "shutterstock.com",
+]
+_BAD_PATH_HINTS = ["/news/", "/blog/", "/article/", "/articles/", "/wiki/"]
+_BAD_TEXT_HINTS = [
+    "top oil and gas companies", "largest oil and gas companies", "market cap",
+    "stock photo", "directory", "list of companies", "ranking",
+]
+_DIGITAL_RESULT_HINTS = [
+    "software", "platform", "saas", "analytics", "automation", "digital",
+    "ai", "iot", "scada", "monitoring", "optimization", "data platform", "cloud",
+]
+_COMPANYISH_HINTS = [
+    "company", "vendor", "provider", "technology", "solutions", "platform", "software", "services"
+]
+
+
+def _record_text(record: dict) -> str:
+    parts = [
+        record.get("company_name"), record.get("description"), record.get("summary"),
+        record.get("snippet"), record.get("website"), record.get("url"),
+        record.get("linkedin_url"), record.get("hq_country"), record.get("industry"), record.get("title"),
+    ]
+    return _normalize_prompt_text(" ".join(str(p) for p in parts if not _is_blank(p)))
+
+
+def _is_valid_company_record(record: dict, task_meta: dict) -> bool:
+    name = _clean_text(record.get("company_name"))
+    website = _clean_text(record.get("website") or record.get("url"))
+    text = _record_text(record)
+    target_category = (task_meta.get("target_category") or "general").strip()
+
+    if not name and not website:
+        return False
+
+    if website:
+        parsed = urlparse(website if "://" in website else f"https://{website}")
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+        if any(bad in host for bad in _BAD_HOST_HINTS):
+            return False
+        if any(bad in path for bad in _BAD_PATH_HINTS):
+            return False
+
+    if any(bad in text for bad in _BAD_TEXT_HINTS):
+        return False
+
+    if len(name.split()) > 10 and any(bad in text for bad in ["top", "best", "largest", "ranking", "list"]):
+        return False
+
+    if target_category == "software_company":
+        digital_ok = any(h in text for h in _DIGITAL_RESULT_HINTS)
+        companyish_ok = bool(website) or any(h in text for h in _COMPANYISH_HINTS)
+        if not (digital_ok and companyish_ok):
+            return False
+
+    return True
+
+
+def _refine_company_records(records: list[dict], task_meta: dict) -> tuple[list[dict], int]:
+    if task_meta.get("task_type") in {"document_research", "people_search"}:
+        return records or [], 0
+
+    refined, removed = [], 0
+    for record in records or []:
+        if _is_valid_company_record(record, task_meta):
+            refined.append(record)
+        else:
+            removed += 1
+
+    if not refined:
+        return records or [], 0
+    return refined, removed
+
+
+def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results", is_papers: bool = False) -> bytes | None:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except Exception:
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    def _pdf_escape(text: str) -> str:
+        return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _clean_cell(value, max_len: int = 1200) -> str:
+        text = _clean_text(value)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > max_len:
+            text = text[: max_len - 3] + "..."
+        return text
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    heading_style = styles["Heading2"]
+    meta_style = ParagraphStyle(
+        "Meta", parent=styles["BodyText"], fontSize=9, leading=11, spaceAfter=4,
+        alignment=TA_LEFT, textColor=colors.HexColor("#333333")
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles["BodyText"], fontSize=10, leading=14, spaceAfter=8, alignment=TA_LEFT
+    )
+    link_style = ParagraphStyle(
+        "Link", parent=styles["BodyText"], fontSize=8, leading=10, spaceAfter=10,
+        alignment=TA_LEFT, textColor=colors.HexColor("#1a4f7a")
+    )
+
+    if is_papers or {"Title", "Abstract"}.issubset(set(df.columns)):
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+        story = [Paragraph(_pdf_escape(title), title_style), Spacer(1, 10), Paragraph(f"{len(df)} results", meta_style), Spacer(1, 12)]
+
+        for i, (_, row) in enumerate(df.iterrows(), start=1):
+            paper_title = _clean_cell(row.get("Title", ""), 300)
+            authors = _clean_cell(row.get("Authors", ""), 250) if "Authors" in df.columns else ""
+            year = _clean_cell(row.get("Year", ""), 20) if "Year" in df.columns else ""
+            abstract = _clean_cell(row.get("Abstract", ""), 2500)
+            url = _clean_cell(row.get("URL", ""), 400) if "URL" in df.columns else ""
+
+            if not paper_title and not abstract and not url:
+                continue
+
+            story.append(Paragraph(f"{i}. {_pdf_escape(paper_title or 'Untitled')}", heading_style))
+            meta_parts = []
+            if authors:
+                meta_parts.append(f"<b>Authors:</b> {_pdf_escape(authors)}")
+            if year:
+                meta_parts.append(f"<b>Year:</b> {_pdf_escape(year)}")
+            if meta_parts:
+                story.append(Paragraph(" &nbsp;&nbsp; ".join(meta_parts), meta_style))
+            if abstract:
+                story.append(Paragraph(f"<b>Abstract:</b> {_pdf_escape(abstract)}", body_style))
+            if url:
+                story.append(Paragraph(f"<b>URL:</b> {_pdf_escape(url)}", link_style))
+            story.append(Spacer(1, 10))
+            if i < len(df) and i % 3 == 0:
+                story.append(PageBreak())
+
+        doc.build(story)
+        return buf.getvalue()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=24, rightMargin=24, topMargin=24, bottomMargin=24)
+    story = [Paragraph(_pdf_escape(title), title_style), Spacer(1, 10), Paragraph(f"{len(df)} results", meta_style), Spacer(1, 10)]
+
+    pdf_df = df.copy()
+    table_header_style = ParagraphStyle("TableHeader", parent=styles["BodyText"], fontSize=8, leading=10, alignment=TA_LEFT)
+    table_cell_style = ParagraphStyle("TableCell", parent=styles["BodyText"], fontSize=7, leading=9, alignment=TA_LEFT)
+
+    wrapped_header = [Paragraph(f"<b>{_pdf_escape(col)}</b>", table_header_style) for col in pdf_df.columns]
+    wrapped_rows = []
+    for _, row in pdf_df.iterrows():
+        wrapped_rows.append([Paragraph(_pdf_escape(_clean_cell(row[col], 500)), table_cell_style) for col in pdf_df.columns])
+
+    table_data = [wrapped_header] + wrapped_rows[:200]
+    ncols = len(pdf_df.columns)
+    if ncols <= 3:
+        col_widths = [180, 280, 220][:ncols]
+    elif ncols == 4:
+        col_widths = [140, 180, 240, 160]
+    else:
+        usable_width = 780
+        col_widths = [usable_width / ncols] * ncols
+
+    table = Table(table_data, repeatRows=1, colWidths=col_widths)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e2f3")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(table)
+    if len(pdf_df) > 200:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Note: PDF includes first 200 rows only.", meta_style))
+    doc.build(story)
+    return buf.getvalue()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# SIDEBAR
+# Sidebar
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<p class="section-header">🔑 Your API Keys</p>', unsafe_allow_html=True)
-
     st.markdown(
         "The agent is free to use. It needs API keys to search and reason. "
-        "**One free key is enough to start** — Groq takes 30 seconds to get.",
-        unsafe_allow_html=False,
+        "**One free key is enough to start** — Groq takes 30 seconds to get."
     )
 
-    # ── LLM KEYS ─────────────────────────────────────────────────────────────
     with st.expander("⚡ Groq Key — Free, most important", expanded=True):
-        _default_groq = _secret("GROQ_API_KEY")
-        groq_key = st.text_input(
-            "Groq API Key",
-            value=_default_groq,
-            type="password",
-            placeholder="gsk_...",
-            label_visibility="collapsed",
-        )
-        if not groq_key:
-            _show_key_guide("groq")
-        else:
-            st.success(f"✅ Groq connected  ({_mask(groq_key)})")
+        groq_key = st.text_input("Groq API Key", value=_secret("GROQ_API_KEY"), type="password", placeholder="gsk_...", label_visibility="collapsed")
+        st.success(f"✅ Groq connected  ({_mask(groq_key)})") if groq_key else _show_key_guide("groq")
 
     with st.expander("🧠 Gemini Key — Free backup LLM", expanded=False):
-        _default_gemini = _secret("GEMINI_API_KEY")
-        gemini_key = st.text_input(
-            "Gemini Key",
-            value=_default_gemini,
-            type="password",
-            placeholder="AIza...",
-            label_visibility="collapsed",
-        )
-        if not gemini_key:
-            _show_key_guide("gemini")
-        else:
-            st.success(f"✅ Gemini connected  ({_mask(gemini_key)})")
+        gemini_key = st.text_input("Gemini Key", value=_secret("GEMINI_API_KEY"), type="password", placeholder="AIza...", label_visibility="collapsed")
+        st.success(f"✅ Gemini connected  ({_mask(gemini_key)})") if gemini_key else _show_key_guide("gemini")
 
     st.markdown('<p class="section-header">🔭 Search Provider Keys</p>', unsafe_allow_html=True)
     st.caption("Optional but strongly recommended. Each is free with generous quotas.")
 
     with st.expander("🔭 Exa — semantic search + LinkedIn profiles", expanded=False):
-        _default_exa = _secret("EXA_API_KEY")
-        exa_key = st.text_input(
-            "Exa Key",
-            value=_default_exa,
-            type="password",
-            placeholder="your-exa-key",
-            label_visibility="collapsed",
-        )
-        if not exa_key:
-            _show_key_guide("exa")
-        else:
-            st.success(f"✅ Exa connected  ({_mask(exa_key)})")
+        exa_key = st.text_input("Exa Key", value=_secret("EXA_API_KEY"), type="password", placeholder="your-exa-key", label_visibility="collapsed")
+        st.success(f"✅ Exa connected  ({_mask(exa_key)})") if exa_key else _show_key_guide("exa")
 
     with st.expander("🌐 Tavily — question-style search", expanded=False):
-        _default_tavily = _secret("TAVILY_API_KEY")
-        tavily_key = st.text_input(
-            "Tavily Key",
-            value=_default_tavily,
-            type="password",
-            placeholder="tvly-...",
-            label_visibility="collapsed",
-        )
-        if not tavily_key:
-            _show_key_guide("tavily")
-        else:
-            st.success(f"✅ Tavily connected  ({_mask(tavily_key)})")
+        tavily_key = st.text_input("Tavily Key", value=_secret("TAVILY_API_KEY"), type="password", placeholder="tvly-...", label_visibility="collapsed")
+        st.success(f"✅ Tavily connected  ({_mask(tavily_key)})") if tavily_key else _show_key_guide("tavily")
 
     with st.expander("🎯 SerpApi — LinkedIn + Google search", expanded=False):
-        _default_serp = _secret("SERPAPI_KEY")
-        serpapi_key = st.text_input(
-            "SerpApi Key",
-            value=_default_serp,
-            type="password",
-            placeholder="your-serpapi-key",
-            label_visibility="collapsed",
-        )
-        if not serpapi_key:
-            _show_key_guide("serpapi")
-        else:
-            st.success(f"✅ SerpApi connected  ({_mask(serpapi_key)})")
+        serpapi_key = st.text_input("SerpApi Key", value=_secret("SERPAPI_KEY"), type="password", placeholder="your-serpapi-key", label_visibility="collapsed")
+        st.success(f"✅ SerpApi connected  ({_mask(serpapi_key)})") if serpapi_key else _show_key_guide("serpapi")
 
     anthropic_key = _secret("ANTHROPIC_API_KEY")
     openai_key = _secret("OPENAI_API_KEY")
@@ -728,60 +612,25 @@ with st.sidebar:
         st.error("⚠️ No keys yet — add at least a free Groq key above.")
 
     st.divider()
-
-    # ── SEARCH OPTIONS ────────────────────────────────────────────────────────
     st.markdown('<p class="section-header">⚙️ Search Options</p>', unsafe_allow_html=True)
-
-    mode_label = st.radio(
-        "Search depth",
-        list(MODE_PRESETS.keys()),
-        index=1,
-        help="Balanced is recommended for most searches.",
-    )
+    mode_label = st.radio("Search depth", list(MODE_PRESETS.keys()), index=1, help="Balanced is recommended for most searches.")
     preset = MODE_PRESETS[mode_label]
     mode = preset["mode"]
     st.caption(preset["desc"])
-
-    max_results = st.slider(
-        "Max results",
-        5,
-        150,
-        value=preset["max"],
-        step=5,
-        help="How many results you want. More = slower search.",
-    )
+    max_results = st.slider("Max results", 5, 150, value=preset["max"], step=5, help="How many results you want. More = slower search.")
 
     st.divider()
-
-    # ── SEED FILE (dedup) ─────────────────────────────────────────────────────
     st.markdown('<p class="section-header">📂 Avoid Duplicates</p>', unsafe_allow_html=True)
     st.caption("Upload a previous results file — new results won't repeat those.")
-    uploaded_file = st.file_uploader(
-        "Previous results (CSV or Excel)",
-        type=["csv", "xlsx"],
-        label_visibility="collapsed",
-    )
+    uploaded_file = st.file_uploader("Previous results (CSV or Excel)", type=["csv", "xlsx"], label_visibility="collapsed")
     if uploaded_file:
         st.success(f"✅ Dedup file loaded: {uploaded_file.name}")
 
     st.divider()
-
-    # ── ADVANCED ──────────────────────────────────────────────────────────────
     with st.expander("🛠️ Advanced options", expanded=False):
-        min_conf = st.slider(
-            "Min confidence score",
-            0,
-            100,
-            35,
-            step=5,
-            help="Lower = more results but less accurate. 35 is a good default.",
-        )
-        export_fmt = st.selectbox(
-            "Export format",
-            ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)"],
-        )
+        min_conf = st.slider("Min confidence score", 0, 100, 35, step=5, help="Lower = more results but less accurate.")
+        export_fmt = st.selectbox("Export format", ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)"])
         export_filename = st.text_input("Export filename", value="results")
-
         st.caption("**Fields to collect:**")
         col1, col2 = st.columns(2)
         field_website = col1.checkbox("Website", value=True)
@@ -793,7 +642,7 @@ with st.sidebar:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Build LLM client on every run
+# LLM client
 # ──────────────────────────────────────────────────────────────────────────────
 llm_client = FreeLLMClient(
     groq_api_key=groq_key,
@@ -806,7 +655,7 @@ backends = llm_client.available_backends()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MAIN AREA
+# Main area
 # ──────────────────────────────────────────────────────────────────────────────
 st.markdown(
     "<h1 style='margin-bottom:0'>🔍 AI Research Agent</h1>"
@@ -835,28 +684,18 @@ prompt = st.text_area(
     ),
     key="main_prompt",
 )
-
 st.session_state["prompt_value"] = prompt
 
 _has_llm = bool(groq_key or gemini_key or anthropic_key or openai_key or openrouter_key)
 _has_search = bool(exa_key or tavily_key or serpapi_key)
-
 if not _has_llm and not _has_search:
-    st.warning(
-        "⚠️ No API keys set — results will be limited (DDG-only, no ranking). "
-        "Add a free Groq key in the sidebar for 10× better results."
-    )
+    st.warning("⚠️ No API keys set — results will be limited (DDG-only, no ranking). Add a free Groq key in the sidebar for much better results.")
 
-run_btn = st.button(
-    "🚀 Run Search",
-    type="primary",
-    use_container_width=True,
-    disabled=not prompt.strip(),
-)
+run_btn = st.button("🚀 Run Search", type="primary", use_container_width=True, disabled=not prompt.strip())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# RUN SEARCH
+# Run search
 # ──────────────────────────────────────────────────────────────────────────────
 if run_btn and prompt.strip():
     st.session_state["search_result"] = None
@@ -868,15 +707,9 @@ if run_btn and prompt.strip():
     with st.spinner("🧠 Understanding your request..."):
         task_spec = parse_task_prompt_llm_first(prompt, llm=llm_client)
 
+    task_spec = _postprocess_task_spec_from_prompt(task_spec, prompt)
     task_spec.mode = mode
     task_spec.max_results = int(max_results)
-
-    has_geo = bool(
-        task_spec.geography.include_countries
-        or task_spec.geography.exclude_countries
-        or task_spec.geography.exclude_presence_countries
-    )
-    task_spec.geography.strict_mode = has_geo
 
     fmt_map = {
         "Auto-detect from prompt": None,
@@ -903,20 +736,10 @@ if run_btn and prompt.strip():
         user_fields.append("summary")
 
     if task_spec.task_type == "document_research":
-        task_spec.target_attributes = sorted(
-            set(
-                [
-                    "website",
-                    "summary",
-                    "author",
-                    "authors",
-                    "year",
-                    "publication_year",
-                    "published_date",
-                    "abstract",
-                ] + user_fields
-            )
-        )
+        task_spec.target_attributes = sorted(set([
+            "website", "summary", "author", "authors", "year",
+            "publication_year", "published_date", "abstract"
+        ] + user_fields))
     elif task_spec.task_type == "people_search":
         task_spec.target_attributes = ["linkedin", "website"]
     else:
@@ -925,28 +748,25 @@ if run_btn and prompt.strip():
     if not task_spec.industry or len(task_spec.industry.strip()) < 2:
         st.error(
             "⚠️ Couldn't detect the topic. Try being more specific: "
-            "'Find oil and gas service companies...' or "
-            "'Find research papers about ESP...'"
+            "'Find oil and gas service companies...' or 'Find research papers about ESP...'"
         )
         st.stop()
 
     geo = task_spec.geography
     with st.container():
-        c1, c2, c3 = st.columns(3)
-        task_labels = {
-            "entity_discovery": "🏢 Companies",
-            "document_research": "📄 Research Papers",
-            "people_search": "👥 LinkedIn Profiles",
-            "market_research": "📊 Market Research",
-        }
-        c1.info(f"**Looking for:** {task_labels.get(task_spec.task_type, '🔍 Entities')}")
-        c2.info(f"**Topic:** {task_spec.industry}")
-        c3.info(f"**Target:** {max_results} results in {mode} mode")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.info(f"**Looking for:** {_humanize_task_type(task_spec.task_type)}")
+        c2.info(f"**Category:** {_humanize_target_category(getattr(task_spec, 'target_category', 'general'))}")
+        c3.info(f"**Industry:** {task_spec.industry}")
+        c4.info(f"**Target:** {max_results} results in {mode} mode")
+
         if geo.include_countries:
-            st.info(f"🌍 Searching IN: {', '.join(c.title() for c in geo.include_countries)}")
-        if geo.exclude_countries:
-            st.warning(f"🚫 Excluding: {', '.join(c.title() for c in geo.exclude_countries)}")
-        if not geo.include_countries and not geo.exclude_countries:
+            st.info(f"🌍 Search in: {', '.join(_title_list(geo.include_countries))}")
+        if geo.exclude_presence_countries:
+            st.warning(f"🚫 Excluding presence in: {', '.join(_title_list(geo.exclude_presence_countries))}")
+        elif geo.exclude_countries:
+            st.warning(f"🚫 Excluding countries: {', '.join(_title_list(geo.exclude_countries))}")
+        if not geo.include_countries and not geo.exclude_countries and not geo.exclude_presence_countries:
             st.info("🌐 No geography filter — searching globally")
 
     provider_settings = ProviderSettings(
@@ -973,15 +793,7 @@ if run_btn and prompt.strip():
 
     progress_bar = st.progress(0, text="Starting...")
     status_box = st.empty()
-    STAGE_PCT = {
-        "DDG": 20,
-        "Exa": 45,
-        "Tavily": 65,
-        "SerpApi": 75,
-        "dedup": 85,
-        "LLM re-rank": 92,
-        "Accepted": 98,
-    }
+    STAGE_PCT = {"DDG": 20, "Exa": 45, "Tavily": 65, "SerpApi": 75, "dedup": 85, "LLM re-rank": 92, "Accepted": 98}
 
     def _progress(msg: str):
         status_box.caption(f"⏳ {msg}")
@@ -1011,6 +823,7 @@ if run_btn and prompt.strip():
     st.session_state["task_meta"] = {
         "task_type": task_spec.task_type,
         "industry": task_spec.industry,
+        "target_category": getattr(task_spec, "target_category", "general"),
         "mode": mode,
         "max_results": int(max_results),
         "include_countries": list(task_spec.geography.include_countries or []),
@@ -1038,35 +851,38 @@ if run_btn and prompt.strip():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# RENDER RESULTS FROM SESSION STATE
+# Render results from session state
 # ──────────────────────────────────────────────────────────────────────────────
 result = st.session_state.get("search_result")
 task_meta = st.session_state.get("task_meta")
 
 if result and task_meta:
-    total = result["total_found"]
-    raw = result["raw_search_results"]
+    raw = result.get("raw_search_results", 0)
     rej = len(result.get("rejected_records", []))
-    b = result["budget"]
-
-    st.markdown(
-        f'<div style="background:#0d2137;border:1px solid #1a4f7a;border-radius:10px;'
-        f'padding:16px 24px;margin:12px 0">'
-        f'<span style="font-size:20px;font-weight:600;color:#4fc3f7">✅ {total} results found</span>'
-        f'<span style="color:#7b8099;font-size:13px;margin-left:16px">'
-        f'from {raw} raw · {rej} filtered out · {b["total_search_calls_used"]} searches</span></div>',
-        unsafe_allow_html=True,
-    )
-
-    records = result.get("records", []) or []
-    df = pd.DataFrame(records)
-
+    b = result.get("budget", {})
+    all_records = result.get("records", []) or []
     is_people = task_meta["task_type"] == "people_search"
     is_papers = task_meta["task_type"] == "document_research"
 
+    refined_records, app_removed = _refine_company_records(all_records, task_meta)
+    records = all_records if (is_people or is_papers) else refined_records
+    total = len(records)
+
+    st.markdown(
+        f'<div style="background:#0d2137;border:1px solid #1a4f7a;border-radius:10px;padding:16px 24px;margin:12px 0">'
+        f'<span style="font-size:20px;font-weight:600;color:#4fc3f7">✅ {total} results shown</span>'
+        f'<span style="color:#7b8099;font-size:13px;margin-left:16px">'
+        f'from {len(all_records)} accepted · {raw} raw · {rej} filtered out by backend · {b.get("total_search_calls_used", 0)} searches</span></div>',
+        unsafe_allow_html=True,
+    )
+    if app_removed:
+        st.caption(f"App-side refinement removed {app_removed} obvious non-company / non-vendor records from display and exports.")
+
+    df = pd.DataFrame(records)
+
     if is_people:
-        SHOW_COLS = ["company_name", "job_title", "employer_name", "city", "linkedin_url", "linkedin_profile"]
-        COL_RENAME = {
+        show_cols = ["company_name", "job_title", "employer_name", "city", "linkedin_url", "linkedin_profile"]
+        col_rename = {
             "company_name": "Name",
             "job_title": "Job Title",
             "employer_name": "Company",
@@ -1074,28 +890,26 @@ if result and task_meta:
             "linkedin_url": "LinkedIn URL",
             "linkedin_profile": "Profile Link",
         }
-        show = [c for c in SHOW_COLS if c in df.columns]
+        show = [c for c in show_cols if c in df.columns]
         df_display = df[show].copy() if show else pd.DataFrame()
-        df_display.columns = [COL_RENAME.get(c, c) for c in show]
-
+        df_display.columns = [col_rename.get(c, c) for c in show]
     elif is_papers:
         df_display = _normalize_paper_records(records)
-
     else:
-        SHOW_COLS = ["company_name", "website"]
+        show_cols = ["company_name", "website"]
         if field_email:
-            SHOW_COLS.append("email")
+            show_cols.append("email")
         if field_phone:
-            SHOW_COLS.append("phone")
+            show_cols.append("phone")
         if field_linkedin:
-            SHOW_COLS.append("linkedin_url")
+            show_cols.append("linkedin_url")
         if field_hq:
-            SHOW_COLS.append("hq_country")
+            show_cols.append("hq_country")
         if field_summary:
-            SHOW_COLS.append("description")
-        SHOW_COLS.append("confidence_score")
+            show_cols.append("description")
+        show_cols.append("confidence_score")
 
-        COL_RENAME = {
+        col_rename = {
             "company_name": "Company",
             "website": "Website",
             "email": "Email",
@@ -1105,40 +919,22 @@ if result and task_meta:
             "description": "Description",
             "confidence_score": "Score",
         }
-
-        show = [c for c in SHOW_COLS if c in df.columns]
+        show = [c for c in show_cols if c in df.columns]
         df_display = df[show].copy() if show else pd.DataFrame()
-        df_display.columns = [COL_RENAME.get(c, c) for c in show]
-
+        df_display.columns = [col_rename.get(c, c) for c in show]
         if "Score" in df_display.columns:
             df_display = df_display.sort_values("Score", ascending=False)
 
     if is_papers:
-        section_labels = {
-            "results": f"📊 Results ({total})",
-            "summaries": "📝 AI Summaries",
-            "download": "⬇️ Download",
-            "details": "🔍 Search Details",
-        }
-        section_options = list(section_labels.keys())
+        section_labels = {"results": f"📊 Results ({total})", "summaries": "📝 AI Summaries", "download": "⬇️ Download", "details": "🔍 Search Details"}
     else:
-        section_labels = {
-            "results": f"📊 Results ({total})",
-            "download": "⬇️ Download",
-            "details": "🔍 Search Details",
-        }
-        section_options = list(section_labels.keys())
+        section_labels = {"results": f"📊 Results ({total})", "download": "⬇️ Download", "details": "🔍 Search Details"}
 
+    section_options = list(section_labels.keys())
     if st.session_state.get("active_section") not in section_options:
         st.session_state["active_section"] = section_options[0]
 
-    selected_section = st.radio(
-        "View",
-        options=section_options,
-        horizontal=True,
-        key="active_section",
-        format_func=lambda x: section_labels[x],
-    )
+    selected_section = st.radio("View", options=section_options, horizontal=True, key="active_section", format_func=lambda x: section_labels[x])
 
     if selected_section == "results":
         if is_people:
@@ -1149,20 +945,12 @@ if result and task_meta:
                 company = row.get("Company", "")
                 loc = row.get("Location", "")
                 url = row.get("LinkedIn URL", "") or row.get("Profile Link", "")
-
-                meta_parts = [p for p in [title, company, loc] if p]
-                meta = " · ".join(meta_parts)
+                meta = " · ".join([p for p in [title, company, loc] if p])
                 link_html = f'<a href="{url}" target="_blank" class="result-link">🔗 View Profile</a>' if url else ""
-
                 st.markdown(
-                    f'<div class="result-card">'
-                    f'<div class="result-name">👤 {name}</div>'
-                    f'<div class="result-meta">{meta}</div>'
-                    f'{link_html}'
-                    f'</div>',
+                    f'<div class="result-card"><div class="result-name">👤 {name}</div><div class="result-meta">{meta}</div>{link_html}</div>',
                     unsafe_allow_html=True,
                 )
-
         elif is_papers:
             st.markdown(f"**{total} papers found**")
             for _, row in df_display.iterrows():
@@ -1171,18 +959,11 @@ if result and task_meta:
                 year = row.get("Year", "")
                 url = row.get("URL", "")
                 abstract = str(row.get("Abstract", ""))[:250]
-
                 meta_parts = [p for p in [str(authors)[:120], str(year)] if p and p != "nan"]
                 meta = " · ".join(meta_parts)
                 link_html = f'<a href="{url}" target="_blank" class="result-link">🔗 View Paper</a>' if url else ""
-
                 st.markdown(
-                    f'<div class="result-card">'
-                    f'<div class="result-name">📄 {title}</div>'
-                    f'<div class="result-meta">{meta}</div>'
-                    f'<div style="font-size:12px;color:#5a6080;margin:6px 0">{abstract}{"..." if len(abstract) == 250 else ""}</div>'
-                    f'{link_html}'
-                    f'</div>',
+                    f'<div class="result-card"><div class="result-name">📄 {title}</div><div class="result-meta">{meta}</div><div style="font-size:12px;color:#5a6080;margin:6px 0">{abstract}{"..." if len(abstract) == 250 else ""}</div>{link_html}</div>',
                     unsafe_allow_html=True,
                 )
         else:
@@ -1201,43 +982,29 @@ if result and task_meta:
     elif selected_section == "summaries":
         st.markdown("### 📝 Paper Summaries")
         st.caption("One plain-English summary per paper — what it found and why it matters.")
-
         if not backends:
             st.warning("⚠️ Add a free Groq or Gemini key in the sidebar to enable summaries.")
         else:
             summary_candidates: list[CompanyRecord] = []
             for r in records:
-                description = _first_nonempty(r, [
-                    "description", "abstract", "summary", "snippet", "paper_abstract"
-                ])
+                description = _first_nonempty(r, ["description", "abstract", "summary", "snippet", "paper_abstract"])
                 if not description.strip():
                     continue
-
                 summary_candidates.append(
                     CompanyRecord(
-                        company_name=_first_nonempty(r, [
-                            "company_name", "title", "paper_title", "document_title", "name"
-                        ]) or "Untitled",
-                        authors=_first_nonempty(r, [
-                            "authors", "author", "paper_authors", "creators", "creator"
-                        ]),
+                        company_name=_first_nonempty(r, ["company_name", "title", "paper_title", "document_title", "name"]) or "Untitled",
+                        authors=_first_nonempty(r, ["authors", "author", "paper_authors", "creators", "creator"]),
                         description=description,
                         doi=_first_nonempty(r, ["doi"]),
-                        website=_first_nonempty(r, [
-                            "website", "url", "paper_url", "source_url", "link"
-                        ]),
+                        website=_first_nonempty(r, ["website", "url", "paper_url", "source_url", "link"]),
                     )
                 )
-
             summary_topic = task_meta.get("industry") or "the topic"
             st.info(f"**{len(summary_candidates)} papers** ready — click to generate summaries.")
-
             if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
                 status_holder = st.empty()
-            
                 def _summary_progress(msg: str):
                     status_holder.caption(f"⏳ {msg}")
-            
                 summaries = summarize_papers(
                     papers=summary_candidates,
                     topic=summary_topic,
@@ -1245,7 +1012,6 @@ if result and task_meta:
                     max_papers=20,
                     progress_callback=_summary_progress,
                 )
-            
                 st.session_state["paper_summaries"] = summaries
                 st.session_state["summaries_topic"] = summary_topic
                 status_holder.empty()
@@ -1255,7 +1021,6 @@ if result and task_meta:
         if st.session_state.get("paper_summaries"):
             summaries = st.session_state["paper_summaries"]
             topic = st.session_state.get("summaries_topic", "research")
-
             for i, s in enumerate(summaries, 1):
                 with st.expander(f"📄 {i}. {s['title'][:75]}", expanded=(i == 1)):
                     meta = []
@@ -1270,50 +1035,27 @@ if result and task_meta:
             txt_bytes = summaries_to_text(summaries, topic).encode("utf-8")
             pdf_bytes = summaries_to_pdf_bytes(summaries, topic)
             fn = topic[:30].replace(" ", "_")
-
             st.divider()
             st.markdown("**⬇️ Download all summaries:**")
             c1, c2 = st.columns(2)
-
             if pdf_bytes:
-                c1.download_button(
-                    "📑 PDF",
-                    data=pdf_bytes,
-                    file_name=f"summaries_{fn}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
+                c1.download_button("📑 PDF", data=pdf_bytes, file_name=f"summaries_{fn}.pdf", mime="application/pdf", use_container_width=True)
             else:
                 c1.warning("Install reportlab to enable PDF summaries.")
-
-            c2.download_button(
-                "📄 Text (.txt)",
-                data=txt_bytes,
-                file_name=f"summaries_{fn}.txt",
-                mime="text/plain",
-                use_container_width=True,
-            )
+            c2.download_button("📄 Text (.txt)", data=txt_bytes, file_name=f"summaries_{fn}.txt", mime="text/plain", use_container_width=True)
 
     elif selected_section == "download":
         st.markdown("### ⬇️ Download your results")
         st.caption("Downloads are generated from the cleaned table shown in the app.")
-
         try:
             xl_buf = io.BytesIO()
             df_display.to_excel(xl_buf, index=False, engine="openpyxl")
             xl_bytes = xl_buf.getvalue()
         except Exception:
             xl_bytes = None
-
         csv_bytes = df_display.to_csv(index=False).encode("utf-8")
-        pdf_bytes = _df_to_pdf_bytes(
-            df_display,
-            title=f"Search Results - {task_meta.get('industry', 'Results')}",
-            is_papers=is_papers,
-        )
-
+        pdf_bytes = _df_to_pdf_bytes(df_display, title=f"Search Results - {task_meta.get('industry', 'Results')}", is_papers=is_papers)
         dl_col1, dl_col2, dl_col3 = st.columns(3)
-
         if xl_bytes:
             dl_col1.download_button(
                 "📊 Excel (.xlsx)",
@@ -1322,26 +1064,11 @@ if result and task_meta:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
-
-        dl_col2.download_button(
-            "📄 CSV (.csv)",
-            data=csv_bytes,
-            file_name=_normalize_filename(export_filename, "csv"),
-            mime="text/csv",
-            use_container_width=True,
-        )
-
+        dl_col2.download_button("📄 CSV (.csv)", data=csv_bytes, file_name=_normalize_filename(export_filename, "csv"), mime="text/csv", use_container_width=True)
         if pdf_bytes:
-            dl_col3.download_button(
-                "📑 PDF",
-                data=pdf_bytes,
-                file_name=_normalize_filename(export_filename, "pdf"),
-                mime="application/pdf",
-                use_container_width=True,
-            )
+            dl_col3.download_button("📑 PDF", data=pdf_bytes, file_name=_normalize_filename(export_filename, "pdf"), mime="application/pdf", use_container_width=True)
         else:
             dl_col3.warning("Install reportlab to enable PDF export.")
-
         st.divider()
         st.dataframe(df_display.head(5), use_container_width=True)
         st.caption(f"Preview: first 5 of {len(df_display)} rows.")
@@ -1349,26 +1076,32 @@ if result and task_meta:
     elif selected_section == "details":
         st.markdown("### 🔍 Search details")
         st.caption("Technical details about how the search ran.")
-
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Results found", total)
-        c2.metric("Raw candidates", raw)
-        c3.metric("Filtered out", rej)
-        c4.metric("Searches made", b["total_search_calls_used"])
+        c1.metric("Results shown", total)
+        c2.metric("Accepted before app refine", len(all_records))
+        c3.metric("Raw candidates", raw)
+        c4.metric("Searches made", b.get("total_search_calls_used", 0))
 
         if backends:
             st.info(f"🤖 AI backends used: {', '.join(backends)}")
         else:
             st.warning("No LLM backend — running without AI ranking. Add a Groq or Gemini key for better results.")
 
-        with st.expander("What the agent understood from your prompt"):
-            st.markdown(f"- **Task type:** {task_meta.get('task_type', '')}")
-            st.markdown(f"- **Topic:** {task_meta.get('industry', '')}")
+        with st.expander("What the agent understood from your prompt", expanded=True):
+            st.markdown(f"- **Task type:** {_humanize_task_type(task_meta.get('task_type', ''))}")
+            st.markdown(f"- **Category:** {_humanize_target_category(task_meta.get('target_category', 'general'))}")
+            st.markdown(f"- **Topic / industry:** {task_meta.get('industry', '')}")
             st.markdown(f"- **Mode:** {task_meta.get('mode', '')}")
             if task_meta.get("include_countries"):
-                st.markdown(f"- **Search in:** {', '.join(c.title() for c in task_meta['include_countries'])}")
+                st.markdown(f"- **Search in:** {', '.join(_title_list(task_meta['include_countries']))}")
             if task_meta.get("exclude_countries"):
-                st.markdown(f"- **Excluded:** {', '.join(c.title() for c in task_meta['exclude_countries'])}")
+                st.markdown(f"- **Excluded countries:** {', '.join(_title_list(task_meta['exclude_countries']))}")
+            if task_meta.get("exclude_presence_countries"):
+                st.markdown(f"- **Excluded presence countries:** {', '.join(_title_list(task_meta['exclude_presence_countries']))}")
+            if task_meta.get("target_attributes"):
+                st.markdown(f"- **Requested fields:** {', '.join(task_meta['target_attributes'])}")
+            if app_removed:
+                st.markdown(f"- **App-side refinement removed:** {app_removed} obvious non-company / non-vendor records")
 
         with st.expander("Providers used"):
             provider_used = []
@@ -1386,13 +1119,10 @@ if result and task_meta:
                 st.caption("No providers ran.")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Footer
-# ──────────────────────────────────────────────────────────────────────────────
 st.divider()
 st.markdown(
     '<p style="text-align:center;color:#3d4363;font-size:12px;font-family:IBM Plex Mono">'
-    "AI Research Agent · Powered by free APIs · No data stored"
-    "</p>",
+    'AI Research Agent · Powered by free APIs · No data stored'
+    '</p>',
     unsafe_allow_html=True,
 )
