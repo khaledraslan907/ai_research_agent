@@ -1081,12 +1081,11 @@ if result and task_meta:
             st.info(f"**{len(summary_candidates)} papers** ready — click to generate summaries.")
 
             if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
-                st.session_state["active_section"] = "summaries"
                 status_holder = st.empty()
-
+            
                 def _summary_progress(msg: str):
                     status_holder.caption(f"⏳ {msg}")
-
+            
                 summaries = summarize_papers(
                     papers=summary_candidates,
                     topic=summary_topic,
@@ -1094,11 +1093,12 @@ if result and task_meta:
                     max_papers=20,
                     progress_callback=_summary_progress,
                 )
-
+            
                 st.session_state["paper_summaries"] = summaries
                 st.session_state["summaries_topic"] = summary_topic
                 status_holder.empty()
                 st.success(f"✅ {len(summaries)} summaries ready — see below and download.")
+                st.rerun()
 
         if st.session_state.get("paper_summaries"):
             summaries = st.session_state["paper_summaries"]
