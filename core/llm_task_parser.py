@@ -1,14 +1,14 @@
 """
 llm_task_parser.py
 ==================
-LLM-powered intent parser. Converts free-form user prompts into
-structured TaskSpec objects.
+LLM-powered intent parser with regex repair / merge.
 
-Fixes in this version:
+Main improvements in this version:
+- Preserves digital/software-company intent even when the LLM collapses the
+  topic to just "oil and gas"
 - Repairs overly broad document topics from the raw prompt
-- Preserves specific paper subjects like "sucker rod pump"
-- Strips output noise like "with authors", "export as PDF", etc.
-- Supports people_search in the task-type allow-list
+- Treats phrasing like "operate outside Egypt and USA" as presence exclusion
+- Merges strong regex signals when the LLM output is incomplete or too generic
 """
 
 from __future__ import annotations
@@ -18,14 +18,8 @@ from typing import Any, Dict, Optional
 
 from core.free_llm_client import FreeLLMClient
 from core.prompt_templates import INTENT_PARSE_PROMPT
-from core.task_models import (
-    CredentialMode,
-    GeographyRules,
-    OutputSpec,
-    TaskSpec,
-)
+from core.task_models import CredentialMode, GeographyRules, OutputSpec, TaskSpec
 from core.geography import normalize_country_name, expand_region_name
-
 
 REGION_EXPANSIONS = {
     "europe": ["france", "germany", "united kingdom", "italy", "spain",
@@ -48,24 +42,9 @@ REGION_EXPANSIONS = {
 }
 
 _GENERIC_DOC_TOPICS = {
-    "petroleum",
-    "petroleum engineering",
-    "oil",
-    "gas",
-    "oil and gas",
-    "oil & gas",
-    "energy",
-    "engineering",
-    "research",
-    "papers",
-    "paper",
-    "study",
-    "studies",
-    "article",
-    "articles",
-    "journal",
-    "journals",
-    "literature",
+    "petroleum", "petroleum engineering", "oil", "gas", "oil and gas", "oil & gas",
+    "energy", "engineering", "research", "papers", "paper", "study", "studies",
+    "article", "articles", "journal", "journals", "literature",
 }
 
 _DOC_TOPIC_PATTERNS = [
@@ -108,18 +87,27 @@ _BROAD_DOMAIN_TAIL_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+_DIGITAL_HINTS = (
+    "digital", "software", "platform", "platforms", "analytics", "automation",
+    "saas", "cloud", "ai", "artificial intelligence", "machine learning",
+    "data", "iot", "scada", "tech company", "technology company", "technology vendor",
+)
+
+_PRESENCE_OUTSIDE_PATTERNS = [
+    r"\boperate(?:s|d|ing)?\s+outside\b",
+    r"\bwork(?:s|ed|ing)?\s+outside\b",
+    r"\bserv(?:e|es|ed|ing)\s+outside\b",
+    r"\bactive\s+outside\b",
+    r"\bpresent\s+outside\b",
+]
+
 
 def parse_with_llm(prompt: str, llm: FreeLLMClient) -> Optional[TaskSpec]:
-    """
-    Parse user prompt into TaskSpec using LLM.
-    Returns None if LLM is unavailable or parsing fails.
-    """
     if not llm.is_available():
         return None
 
     llm_prompt = INTENT_PARSE_PROMPT.format(prompt=prompt)
     result = llm.generate_json(llm_prompt, timeout=30)
-
     if not result or not isinstance(result, dict):
         return None
 
@@ -186,12 +174,6 @@ def _is_generic_document_topic(text: str) -> bool:
 
 
 def _extract_document_topic_from_prompt(raw_prompt: str) -> str:
-    """
-    Recover the specific document topic from the raw user prompt.
-    Example:
-      'find papers about sucker rod pump in petroleum'
-      -> 'sucker rod pump'
-    """
     prompt = _norm_spaces(raw_prompt)
 
     for pattern in _DOC_TOPIC_PATTERNS:
@@ -218,16 +200,12 @@ def _extract_document_topic_from_prompt(raw_prompt: str) -> str:
 
 
 def _repair_topic(raw_prompt: str, topic: str, task_type: str) -> str:
-    """
-    Repair overly broad topics produced by the LLM for document research.
-    """
     topic = _norm_spaces(topic)
 
     if task_type != "document_research":
         return topic
 
     extracted = _extract_document_topic_from_prompt(raw_prompt)
-
     if extracted:
         if _is_generic_document_topic(topic):
             return extracted
@@ -238,9 +216,11 @@ def _repair_topic(raw_prompt: str, topic: str, task_type: str) -> str:
     return topic or extracted
 
 
-def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
-    """Convert LLM JSON output → TaskSpec dataclass."""
+def _looks_like_presence_exclusion(prompt_lower: str) -> bool:
+    return any(re.search(pat, prompt_lower) for pat in _PRESENCE_OUTSIDE_PATTERNS)
 
+
+def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
     task_type = data.get("task_type", "entity_discovery")
     if task_type not in {
         "entity_discovery",
@@ -268,13 +248,21 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
     exclude_countries = _expand_countries([c for c in exclude_raw if c])
     excpres_countries = _expand_countries([c for c in excpres_raw if c])
 
-    include_countries = [c for c in include_countries if c not in exclude_countries]
+    prompt_lower = _norm_spaces(raw_prompt).lower()
+    if task_type in {"entity_discovery", "entity_enrichment", "similar_entity_expansion", "market_research"}:
+        if any(hint in prompt_lower for hint in _DIGITAL_HINTS):
+            entity_category = "software_company"
+
+    if _looks_like_presence_exclusion(prompt_lower) and exclude_countries and not excpres_countries:
+        excpres_countries = sorted(set(exclude_countries))
+
+    include_countries = [c for c in include_countries if c not in exclude_countries and c not in excpres_countries]
     strict_mode = bool(include_countries or exclude_countries or excpres_countries)
 
     attrs_raw = data.get("attributes_wanted", []) or []
     valid_attrs = {
-        "website", "email", "phone", "linkedin", "summary",
-        "hq_country", "presence_countries", "pdf", "author", "authors", "doi", "abstract"
+        "website", "email", "phone", "linkedin", "summary", "hq_country",
+        "presence_countries", "pdf", "author", "authors", "doi", "abstract"
     }
     attributes = [a for a in attrs_raw if a in valid_attrs]
     if "website" not in attributes:
@@ -312,17 +300,62 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any]) -> TaskSpec:
     )
 
 
+def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec) -> TaskSpec:
+    """
+    Fill gaps in the LLM parse with strong regex signals.
+    """
+    # Prefer regex if the LLM left the topic blank or too generic.
+    if not getattr(llm_spec, "industry", "").strip():
+        llm_spec.industry = regex_spec.industry
+    elif llm_spec.task_type == "document_research" and _is_generic_document_topic(llm_spec.industry):
+        llm_spec.industry = regex_spec.industry or llm_spec.industry
+
+    # Strengthen category when regex confidently detects software/service company
+    if getattr(llm_spec, "target_category", "general") == "general" and getattr(regex_spec, "target_category", "general") != "general":
+        llm_spec.target_category = regex_spec.target_category
+
+    # Geography merge
+    llm_geo = llm_spec.geography
+    rx_geo = regex_spec.geography
+
+    if not list(llm_geo.include_countries or []) and list(rx_geo.include_countries or []):
+        llm_geo.include_countries = list(rx_geo.include_countries or [])
+    if not list(llm_geo.exclude_countries or []) and list(rx_geo.exclude_countries or []):
+        llm_geo.exclude_countries = list(rx_geo.exclude_countries or [])
+    if not list(llm_geo.exclude_presence_countries or []) and list(rx_geo.exclude_presence_countries or []):
+        llm_geo.exclude_presence_countries = list(rx_geo.exclude_presence_countries or [])
+
+    llm_geo.strict_mode = bool(
+        list(llm_geo.include_countries or [])
+        or list(llm_geo.exclude_countries or [])
+        or list(llm_geo.exclude_presence_countries or [])
+    )
+
+    # If LLM missed a more specific task type, allow regex to upgrade it.
+    if llm_spec.task_type == "entity_discovery" and regex_spec.task_type in {"document_research", "people_search", "market_research"}:
+        llm_spec.task_type = regex_spec.task_type
+
+    # Use regex attributes when LLM returned almost nothing.
+    if not list(llm_spec.target_attributes or []):
+        llm_spec.target_attributes = list(regex_spec.target_attributes or [])
+
+    return llm_spec
+
+
 def parse_task_prompt_llm_first(
     prompt: str,
     llm: Optional[FreeLLMClient] = None,
 ) -> TaskSpec:
     """
-    Main entry point. Tries LLM first; falls back to regex parser.
+    Main entry point. Tries LLM first, then repairs/merges with the regex parser.
     """
+    from core.task_parser import parse_task_prompt as _regex_parse
+
+    regex_spec = _regex_parse(prompt)
+
     if llm and llm.is_available():
         result = parse_with_llm(prompt, llm)
-        if result and result.industry:
-            return result
+        if result:
+            return _merge_llm_with_regex(prompt, result, regex_spec)
 
-    from core.task_parser import parse_task_prompt as _regex_parse
-    return _regex_parse(prompt)
+    return regex_spec
