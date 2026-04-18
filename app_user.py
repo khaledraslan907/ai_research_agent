@@ -710,11 +710,10 @@ if run_btn and prompt.strip():
 
     # ── TABS ─────────────────────────────────────────────────────────────────
     if is_papers:
-        tab_results, tab_summaries, tab_download, tab_feynman, tab_details = st.tabs([
+        tab_results, tab_summaries, tab_download, tab_details = st.tabs([
             f"📊 Results ({total})",
             "📝 AI Summaries",
             "⬇️ Download",
-            "🔬 Deep Research (Feynman)",
             "🔍 Search Details",
         ])
     else:
@@ -723,7 +722,6 @@ if run_btn and prompt.strip():
             "⬇️ Download",
             "🔍 Search Details",
         ])
-        tab_feynman  = None
         tab_summaries = None
 
     # ── Results tab ────────────────────────────────────────────────────────────
@@ -929,117 +927,7 @@ if run_btn and prompt.strip():
                     use_container_width=True,
                 )
 
-    # ── Feynman Deep Research tab (papers only) ──────────────────────────────
-    if tab_feynman is not None:
-        with tab_feynman:
-            from core.feynman_bridge import (
-                is_feynman_installed, get_feynman_version,
-                run_feynman_lit_review, run_feynman_deep_research,
-                run_feynman_review, run_feynman_audit,
-                papers_to_feynman_context, papers_to_doi_list,
-            )
 
-            st.markdown("### 🔬 Deep Research with Feynman")
-            st.caption(
-                "Feynman reads all papers you found, synthesises findings, "
-                "verifies citations, and writes a cited research brief. "
-                "It works on the papers your agent just found above."
-            )
-
-            _ok = is_feynman_installed()
-            if not _ok:
-                st.warning(
-                    "**Feynman is not installed.**\n\n"
-                    "**Windows (PowerShell as Administrator):**\n"
-                    "```powershell\nirm https://feynman.is/install.ps1 | iex\n```\n\n"
-                    "**macOS / Linux:**\n"
-                    "```bash\ncurl -fsSL https://feynman.is/install | bash\n```\n\n"
-                    "Then run `feynman setup` to configure your API key.  "
-                    "[Feynman docs →](https://www.feynman.is/docs/getting-started/installation)"
-                )
-            else:
-                st.success(f"✅ Feynman installed — version `{get_feynman_version()}`")
-
-            _papers = [
-                CompanyRecord(**r) for r in result.get("records", [])
-                if r.get("page_type") == "document" or r.get("doi") or r.get("authors")
-            ]
-            st.info(f"**{len(_papers)} papers** ready for deep analysis.")
-
-            with st.expander("📄 Preview papers being sent to Feynman", expanded=False):
-                st.code(
-                    papers_to_feynman_context(_papers, task_spec.industry or "topic", max_papers=8),
-                    language="text",
-                )
-
-            st.divider()
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("**📚 Literature Review** `feynman lit`")
-                st.caption("Consensus map + open questions. ~2–3 min.")
-                if st.button("Run Literature Review", key="u_feynman_lit", disabled=not _ok):
-                    with st.spinner("🔬 Running literature review..."):
-                        r2 = run_feynman_lit_review(task_spec.industry or "topic", _papers)
-                    if r2["success"]:
-                        st.success("Done")
-                        st.markdown(r2["output"])
-                        st.download_button("⬇️ Download", data=r2["output"],
-                            file_name="lit_review.md", mime="text/markdown")
-                    else:
-                        st.error(r2["error"])
-
-                st.markdown("**🧪 Peer Review** `feynman review`")
-                st.caption("Severity-graded critique + revision plan. ~2 min.")
-                if st.button("Run Peer Review", key="u_feynman_review", disabled=not _ok):
-                    with st.spinner("🔬 Simulating peer review..."):
-                        r2 = run_feynman_review(task_spec.industry or "topic", _papers)
-                    if r2["success"]:
-                        c = r2.get("severity_counts", {})
-                        st.success(f"Done — Critical:{c.get('critical',0)} Major:{c.get('major',0)} Minor:{c.get('minor',0)}")
-                        st.markdown(r2["output"])
-                    else:
-                        st.error(r2["error"])
-
-            with col2:
-                st.markdown("**🧠 Deep Research** `feynman deepresearch`")
-                st.caption("Full multi-agent: Researcher → Reviewer → Writer → Verifier. ~5–10 min.")
-                if st.button("Run Deep Research", key="u_feynman_deep", disabled=not _ok):
-                    with st.spinner("🧠 Multi-agent deep research running..."):
-                        r2 = run_feynman_deep_research(task_spec.industry or "topic", _papers)
-                    if r2["success"]:
-                        st.success("Done")
-                        st.markdown(r2["output"])
-                        st.download_button("⬇️ Download Brief", data=r2["output"],
-                            file_name=f"research_brief_{task_spec.industry or 'topic'}.md",
-                            mime="text/markdown")
-                    else:
-                        st.error(r2["error"])
-
-                st.markdown("**🔍 Claim Audit** `feynman audit`")
-                st.caption("Checks if paper code matches its claims. ~1 min/paper.")
-                if st.button("Audit Papers", key="u_feynman_audit", disabled=not _ok):
-                    prog = st.progress(0)
-                    audit_rows = []
-                    for idx, paper in enumerate(_papers[:10]):
-                        prog.progress((idx + 1) / min(len(_papers), 10))
-                        with st.spinner(f"Auditing {paper.company_name[:40]}..."):
-                            ar = run_feynman_audit(paper)
-                        audit_rows.append({
-                            "Title":  paper.company_name[:60],
-                            "Result": "⚠️ MISMATCH" if ar.get("is_mismatch") else ("✅ OK" if ar["success"] else "❓ N/A"),
-                        })
-                    prog.empty()
-                    st.dataframe(pd.DataFrame(audit_rows), use_container_width=True)
-
-            st.divider()
-            st.caption("Run these commands in your terminal for the same results:")
-            topic_safe = (task_spec.industry or "topic").replace('"', '')
-            doi_list = papers_to_doi_list(_papers)
-            cmd = f'feynman lit "{topic_safe}"\nfeynman deepresearch "{topic_safe}"'
-            if doi_list:
-                cmd += f"\nfeynman audit {doi_list[0]}"
-            st.code(cmd, language="bash")
 
     # ── Search details tab ────────────────────────────────────────────────────
     with tab_details:
