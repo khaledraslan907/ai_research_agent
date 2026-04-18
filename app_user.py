@@ -300,23 +300,137 @@ def _safe_pdf_text(value, max_len: int = 350) -> str:
     return text
 
 
-def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results") -> bytes | None:
+def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results", is_papers: bool = False) -> bytes | None:
     """
     Returns PDF bytes using reportlab.
-    Install once if needed:
-        pip install reportlab
+
+    For paper results:
+      - uses a readable report layout (one paper per block)
+    For non-paper results:
+      - uses an improved wrapped table
     """
     try:
         from reportlab.lib import colors
-        from reportlab.lib.pagesizes import landscape, A4
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            Table,
+            TableStyle,
+            PageBreak,
+        )
     except Exception:
         return None
 
     if df is None or df.empty:
         return None
 
+    def _pdf_escape(text: str) -> str:
+        return (
+            str(text or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    def _clean_cell(value, max_len: int = 1200) -> str:
+        text = _clean_text(value)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > max_len:
+            text = text[: max_len - 3] + "..."
+        return text
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    heading_style = styles["Heading2"]
+
+    meta_style = ParagraphStyle(
+        "Meta",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=11,
+        spaceAfter=4,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor("#333333"),
+    )
+
+    body_style = ParagraphStyle(
+        "Body",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        spaceAfter=8,
+        alignment=TA_LEFT,
+    )
+
+    link_style = ParagraphStyle(
+        "Link",
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=10,
+        spaceAfter=10,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor("#1a4f7a"),
+    )
+
+    # ── PAPER REPORT LAYOUT ────────────────────────────────────────────────
+    if is_papers or {"Title", "Abstract"}.issubset(set(df.columns)):
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=A4,
+            leftMargin=36,
+            rightMargin=36,
+            topMargin=36,
+            bottomMargin=36,
+        )
+
+        story = [
+            Paragraph(_pdf_escape(title), title_style),
+            Spacer(1, 10),
+            Paragraph(f"{len(df)} results", meta_style),
+            Spacer(1, 12),
+        ]
+
+        for i, (_, row) in enumerate(df.iterrows(), start=1):
+            paper_title = _clean_cell(row.get("Title", ""), 300)
+            authors = _clean_cell(row.get("Authors", ""), 250) if "Authors" in df.columns else ""
+            year = _clean_cell(row.get("Year", ""), 20) if "Year" in df.columns else ""
+            abstract = _clean_cell(row.get("Abstract", ""), 2500)
+            url = _clean_cell(row.get("URL", ""), 400) if "URL" in df.columns else ""
+
+            if not paper_title and not abstract and not url:
+                continue
+
+            story.append(Paragraph(f"{i}. {_pdf_escape(paper_title or 'Untitled')}", heading_style))
+
+            meta_parts = []
+            if authors:
+                meta_parts.append(f"<b>Authors:</b> {_pdf_escape(authors)}")
+            if year:
+                meta_parts.append(f"<b>Year:</b> {_pdf_escape(year)}")
+            if meta_parts:
+                story.append(Paragraph(" &nbsp;&nbsp; ".join(meta_parts), meta_style))
+
+            if abstract:
+                story.append(Paragraph(f"<b>Abstract:</b> {_pdf_escape(abstract)}", body_style))
+
+            if url:
+                story.append(Paragraph(f"<b>URL:</b> {_pdf_escape(url)}", link_style))
+
+            story.append(Spacer(1, 10))
+
+            # Add page break every 3 papers for readability
+            if i < len(df) and i % 3 == 0:
+                story.append(PageBreak())
+
+        doc.build(story)
+        return buf.getvalue()
+
+    # ── IMPROVED TABLE LAYOUT FOR NON-PAPER RESULTS ────────────────────────
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -327,22 +441,56 @@ def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results") -> bytes | None:
         bottomMargin=24,
     )
 
-    styles = getSampleStyleSheet()
     story = [
-        Paragraph(title, styles["Title"]),
+        Paragraph(_pdf_escape(title), title_style),
+        Spacer(1, 10),
+        Paragraph(f"{len(df)} results", meta_style),
         Spacer(1, 10),
     ]
 
     pdf_df = df.copy()
+
+    # Convert all cells to wrapped Paragraph objects
+    wrapped_header = []
+    wrapped_rows = []
+
+    table_header_style = ParagraphStyle(
+        "TableHeader",
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=10,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+    )
+
+    table_cell_style = ParagraphStyle(
+        "TableCell",
+        parent=styles["BodyText"],
+        fontSize=7,
+        leading=9,
+        alignment=TA_LEFT,
+    )
+
     for col in pdf_df.columns:
-        pdf_df[col] = pdf_df[col].map(lambda x: _safe_pdf_text(x, 220))
+        wrapped_header.append(Paragraph(f"<b>{_pdf_escape(col)}</b>", table_header_style))
 
-    max_rows = min(len(pdf_df), 200)
-    table_data = [list(pdf_df.columns)] + pdf_df.head(max_rows).values.tolist()
+    for _, row in pdf_df.iterrows():
+        wrapped_row = []
+        for col in pdf_df.columns:
+            cell_text = _clean_cell(row[col], 500)
+            wrapped_row.append(Paragraph(_pdf_escape(cell_text), table_cell_style))
+        wrapped_rows.append(wrapped_row)
 
-    usable_width = 780
-    col_width = max(90, usable_width / max(1, len(pdf_df.columns)))
-    col_widths = [col_width] * len(pdf_df.columns)
+    table_data = [wrapped_header] + wrapped_rows[:200]
+
+    ncols = len(pdf_df.columns)
+    if ncols <= 3:
+        col_widths = [180, 280, 220][:ncols]
+    elif ncols == 4:
+        col_widths = [140, 180, 240, 160]
+    else:
+        usable_width = 780
+        col_widths = [usable_width / ncols] * ncols
 
     table = Table(table_data, repeatRows=1, colWidths=col_widths)
     table.setStyle(
@@ -351,18 +499,22 @@ def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results") -> bytes | None:
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e2f3")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ]
         )
     )
 
     story.append(table)
-    if len(pdf_df) > max_rows:
+
+    if len(pdf_df) > 200:
         story.append(Spacer(1, 10))
-        story.append(Paragraph(f"Note: PDF preview includes first {max_rows} rows only.", styles["Normal"]))
+        story.append(Paragraph("Note: PDF includes first 200 rows only.", meta_style))
 
     doc.build(story)
     return buf.getvalue()
@@ -1157,6 +1309,7 @@ if result and task_meta:
         pdf_bytes = _df_to_pdf_bytes(
             df_display,
             title=f"Search Results - {task_meta.get('industry', 'Results')}",
+            is_papers=is_papers,
         )
 
         dl_col1, dl_col2, dl_col3 = st.columns(3)
