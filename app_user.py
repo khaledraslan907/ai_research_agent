@@ -2,21 +2,21 @@
 app_user.py  —  AI Research Agent  (user-facing / deployable version)
 =====================================================================
 Designed for Streamlit Cloud deployment.
-- Users enter their own API keys (with step-by-step guidance)
-- Works with just ONE key (free Groq or Gemini is enough to start)
-- Only shows results, not rejected/logs/budget noise
-- Clean, guided UX for non-technical users
-- Reads keys from st.secrets when deployed, input fields as fallback
 
-Key fix in this version:
+Key fixes in this version:
 - Search results, task metadata, and summaries are stored in st.session_state
-- Clicking "Generate Summaries" no longer makes the results disappear
+- Summary generation no longer makes the results disappear
+- Summary page stays selected after rerun (radio-based sections instead of st.tabs)
+- Paper results download uses Excel / CSV / PDF
+- Summary download uses TXT / PDF
+- Paper results table removes DOI and tries harder to recover Authors / Year
 """
 
 from __future__ import annotations
 
 import io
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -29,7 +29,11 @@ import streamlit as st
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
 from core.models import ProviderSettings, CompanyRecord
-from core.paper_summarizer import summarize_papers, summaries_to_markdown, summaries_to_text
+from core.paper_summarizer import (
+    summarize_papers,
+    summaries_to_text,
+    summaries_to_pdf_bytes,
+)
 from pipeline.orchestrator import SearchOrchestrator
 
 
@@ -58,6 +62,9 @@ if "summaries_topic" not in st.session_state:
 
 if "prompt_value" not in st.session_state:
     st.session_state["prompt_value"] = ""
+
+if "active_section" not in st.session_state:
+    st.session_state["active_section"] = "results"
 
 
 # ── Custom CSS — refined dark-industrial aesthetic ────────────────────────────
@@ -171,15 +178,190 @@ def _read_file(file) -> pd.DataFrame | None:
 
 
 def _normalize_filename(name: str, fmt: str) -> str:
-    ext = {"xlsx": ".xlsx", "csv": ".csv", "json": ".json", "pdf": ".pdf"}.get(fmt, ".xlsx")
+    ext_map = {"xlsx": ".xlsx", "csv": ".csv", "pdf": ".pdf", "json": ".json"}
+    desired_ext = ext_map.get(fmt, ".xlsx")
     name = (name or "results").strip()
-    return name if name.lower().endswith(ext) else name + ext
+
+    for ext in ext_map.values():
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+
+    return name + desired_ext
 
 
 def _mask(key: str) -> str:
     if not key or len(key) < 8:
         return ""
     return key[:4] + "•" * (len(key) - 8) + key[-4:]
+
+
+def _is_blank(value) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    s = str(value).strip()
+    return s == "" or s.lower() in {"nan", "none", "null"}
+
+
+def _clean_text(value) -> str:
+    return "" if _is_blank(value) else str(value).strip()
+
+
+def _first_nonempty(record: dict, keys: list[str]) -> str:
+    for key in keys:
+        if key in record and not _is_blank(record.get(key)):
+            return _clean_text(record.get(key))
+    return ""
+
+
+def _parse_year(value) -> str:
+    if _is_blank(value):
+        return ""
+    s = str(value).strip()
+
+    try:
+        f = float(s)
+        if 1900 <= int(f) <= 2100:
+            return str(int(f))
+    except Exception:
+        pass
+
+    m = re.search(r"\b(19|20)\d{2}\b", s)
+    return m.group(0) if m else ""
+
+
+def _normalize_paper_records(records: list[dict]) -> pd.DataFrame:
+    """
+    Build a robust paper dataframe from many possible field names.
+    DOI removed intentionally.
+    """
+    rows = []
+
+    for r in records:
+        title = _first_nonempty(r, [
+            "company_name", "title", "paper_title", "document_title", "name"
+        ])
+
+        authors = _first_nonempty(r, [
+            "authors", "author", "paper_authors", "creators", "creator"
+        ])
+
+        year = _parse_year(_first_nonempty(r, [
+            "publication_year", "year", "published_year",
+            "publication_date", "published_date", "date"
+        ]))
+
+        abstract = _first_nonempty(r, [
+            "description", "abstract", "summary", "snippet", "paper_abstract"
+        ])
+
+        url = _first_nonempty(r, [
+            "website", "url", "paper_url", "source_url", "link"
+        ])
+
+        rows.append(
+            {
+                "Title": title,
+                "Authors": authors,
+                "Year": year,
+                "Abstract": abstract,
+                "URL": url,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return pd.DataFrame(columns=["Title", "Abstract", "URL"])
+
+    keep_cols = []
+    for c in df.columns:
+        nonempty = df[c].astype(str).str.strip().replace({"nan": "", "None": ""})
+        if c in {"Title", "Abstract", "URL"} or (nonempty != "").any():
+            keep_cols.append(c)
+
+    return df[keep_cols].copy()
+
+
+def _safe_pdf_text(value, max_len: int = 350) -> str:
+    text = _clean_text(value)
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > max_len:
+        text = text[: max_len - 3] + "..."
+    return text
+
+
+def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results") -> bytes | None:
+    """
+    Returns PDF bytes using reportlab.
+    Install once if needed:
+        pip install reportlab
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import landscape, A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    except Exception:
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=24,
+        rightMargin=24,
+        topMargin=24,
+        bottomMargin=24,
+    )
+
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph(title, styles["Title"]),
+        Spacer(1, 10),
+    ]
+
+    pdf_df = df.copy()
+    for col in pdf_df.columns:
+        pdf_df[col] = pdf_df[col].map(lambda x: _safe_pdf_text(x, 220))
+
+    max_rows = min(len(pdf_df), 200)
+    table_data = [list(pdf_df.columns)] + pdf_df.head(max_rows).values.tolist()
+
+    usable_width = 780
+    col_width = max(90, usable_width / max(1, len(pdf_df.columns)))
+    col_widths = [col_width] * len(pdf_df.columns)
+
+    table = Table(table_data, repeatRows=1, colWidths=col_widths)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e2f3")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+            ]
+        )
+    )
+
+    story.append(table)
+    if len(pdf_df) > max_rows:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f"Note: PDF preview includes first {max_rows} rows only.", styles["Normal"]))
+
+    doc.build(story)
+    return buf.getvalue()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -363,7 +545,6 @@ with st.sidebar:
         else:
             st.success(f"✅ SerpApi connected  ({_mask(serpapi_key)})")
 
-    # Hidden paid keys — only shown if already set via secrets
     anthropic_key = _secret("ANTHROPIC_API_KEY")
     openai_key = _secret("OPENAI_API_KEY")
     openrouter_key = _secret("OPENROUTER_API_KEY")
@@ -441,7 +622,7 @@ with st.sidebar:
         )
         export_fmt = st.selectbox(
             "Export format",
-            ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)", "JSON (.json)"],
+            ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)"],
         )
         export_filename = st.text_input("Export filename", value="results")
 
@@ -499,7 +680,6 @@ prompt = st.text_area(
     key="main_prompt",
 )
 
-# keep prompt mirrored
 st.session_state["prompt_value"] = prompt
 
 _has_llm = bool(groq_key or gemini_key or anthropic_key or openai_key or openrouter_key)
@@ -523,11 +703,11 @@ run_btn = st.button(
 # RUN SEARCH
 # ──────────────────────────────────────────────────────────────────────────────
 if run_btn and prompt.strip():
-    # Clear previous run state before new search
     st.session_state["search_result"] = None
     st.session_state["task_meta"] = None
     st.session_state["paper_summaries"] = []
     st.session_state["summaries_topic"] = ""
+    st.session_state["active_section"] = "results"
 
     with st.spinner("🧠 Understanding your request..."):
         task_spec = parse_task_prompt_llm_first(prompt, llm=llm_client)
@@ -547,7 +727,6 @@ if run_btn and prompt.strip():
         "Excel (.xlsx)": "xlsx",
         "CSV (.csv)": "csv",
         "PDF (.pdf)": "pdf",
-        "JSON (.json)": "json",
     }
     if fmt_map.get(export_fmt):
         task_spec.output.format = fmt_map[export_fmt]
@@ -568,7 +747,20 @@ if run_btn and prompt.strip():
         user_fields.append("summary")
 
     if task_spec.task_type == "document_research":
-        task_spec.target_attributes = sorted(set(["website", "summary", "author"] + user_fields))
+        task_spec.target_attributes = sorted(
+            set(
+                [
+                    "website",
+                    "summary",
+                    "author",
+                    "authors",
+                    "year",
+                    "publication_year",
+                    "published_date",
+                    "abstract",
+                ] + user_fields
+            )
+        )
     elif task_spec.task_type == "people_search":
         task_spec.target_attributes = ["linkedin", "website"]
     else:
@@ -677,12 +869,12 @@ if run_btn and prompt.strip():
         st.error("No results found.")
         hints = []
         if not exa_key:
-            hints.append("add a **free Exa key** (exa.ai) in the sidebar")
+            hints.append("add a free Exa key (exa.ai) in the sidebar")
         if not tavily_key:
-            hints.append("add a **free Tavily key** (tavily.com)")
+            hints.append("add a free Tavily key (tavily.com)")
         if mode == "Fast":
-            hints.append("switch to **Balanced** or **Deep** mode")
-        hints.append("try **lowering the confidence score** to 25 in Advanced options")
+            hints.append("switch to Balanced or Deep mode")
+        hints.append("try lowering the confidence score to 25 in Advanced options")
         hints.append("rephrase your search to include the specific industry or topic")
         if hints:
             st.info("**To get results:**\n" + "\n".join(f"- {h}" for h in hints))
@@ -710,7 +902,7 @@ if result and task_meta:
         unsafe_allow_html=True,
     )
 
-    records = result.get("records", [])
+    records = result.get("records", []) or []
     df = pd.DataFrame(records)
 
     is_people = task_meta["task_type"] == "people_search"
@@ -726,16 +918,13 @@ if result and task_meta:
             "linkedin_url": "LinkedIn URL",
             "linkedin_profile": "Profile Link",
         }
+        show = [c for c in SHOW_COLS if c in df.columns]
+        df_display = df[show].copy() if show else pd.DataFrame()
+        df_display.columns = [COL_RENAME.get(c, c) for c in show]
+
     elif is_papers:
-        SHOW_COLS = ["company_name", "authors", "publication_year", "doi", "description", "website"]
-        COL_RENAME = {
-            "company_name": "Title",
-            "authors": "Authors",
-            "publication_year": "Year",
-            "doi": "DOI",
-            "description": "Abstract",
-            "website": "URL",
-        }
+        df_display = _normalize_paper_records(records)
+
     else:
         SHOW_COLS = ["company_name", "website"]
         if field_email:
@@ -761,25 +950,41 @@ if result and task_meta:
             "confidence_score": "Score",
         }
 
-    show = [c for c in SHOW_COLS if c in df.columns]
-    df_display = df[show].copy() if show else pd.DataFrame()
-    df_display.columns = [COL_RENAME.get(c, c) for c in show]
+        show = [c for c in SHOW_COLS if c in df.columns]
+        df_display = df[show].copy() if show else pd.DataFrame()
+        df_display.columns = [COL_RENAME.get(c, c) for c in show]
 
-    if "Score" in df_display.columns:
-        df_display = df_display.sort_values("Score", ascending=False)
+        if "Score" in df_display.columns:
+            df_display = df_display.sort_values("Score", ascending=False)
 
     if is_papers:
-        tab_results, tab_summaries, tab_download, tab_details = st.tabs(
-            [f"📊 Results ({total})", "📝 AI Summaries", "⬇️ Download", "🔍 Search Details"]
-        )
+        section_labels = {
+            "results": f"📊 Results ({total})",
+            "summaries": "📝 AI Summaries",
+            "download": "⬇️ Download",
+            "details": "🔍 Search Details",
+        }
+        section_options = list(section_labels.keys())
     else:
-        tab_results, tab_download, tab_details = st.tabs(
-            [f"📊 Results ({total})", "⬇️ Download", "🔍 Search Details"]
-        )
-        tab_summaries = None
+        section_labels = {
+            "results": f"📊 Results ({total})",
+            "download": "⬇️ Download",
+            "details": "🔍 Search Details",
+        }
+        section_options = list(section_labels.keys())
 
-    # ── Results tab ────────────────────────────────────────────────────────
-    with tab_results:
+    if st.session_state.get("active_section") not in section_options:
+        st.session_state["active_section"] = section_options[0]
+
+    selected_section = st.radio(
+        "View",
+        options=section_options,
+        horizontal=True,
+        key="active_section",
+        format_func=lambda x: section_labels[x],
+    )
+
+    if selected_section == "results":
         if is_people:
             st.markdown(f"**{total} LinkedIn profiles found**")
             for _, row in df_display.head(total).iterrows():
@@ -808,14 +1013,12 @@ if result and task_meta:
                 title = row.get("Title", "")
                 authors = row.get("Authors", "")
                 year = row.get("Year", "")
-                doi = row.get("DOI", "")
                 url = row.get("URL", "")
                 abstract = str(row.get("Abstract", ""))[:250]
 
-                meta_parts = [p for p in [str(authors)[:80], str(year)] if p and p != "nan"]
+                meta_parts = [p for p in [str(authors)[:120], str(year)] if p and p != "nan"]
                 meta = " · ".join(meta_parts)
-                link_ref = doi or url or ""
-                link_html = f'<a href="{link_ref}" target="_blank" class="result-link">🔗 View Paper</a>' if link_ref else ""
+                link_html = f'<a href="{url}" target="_blank" class="result-link">🔗 View Paper</a>' if url else ""
 
                 st.markdown(
                     f'<div class="result-card">'
@@ -839,83 +1042,105 @@ if result and task_meta:
                 },
             )
 
-    # ── Summaries tab ──────────────────────────────────────────────────────
-    if tab_summaries is not None:
-        with tab_summaries:
-            st.markdown("### 📝 Paper Summaries")
-            st.caption("One plain-English summary per paper — what it found and why it matters.")
+    elif selected_section == "summaries":
+        st.markdown("### 📝 Paper Summaries")
+        st.caption("One plain-English summary per paper — what it found and why it matters.")
 
-            if not backends:
-                st.warning("⚠️ Add a free Groq or Gemini key in the sidebar to enable summaries.")
-            else:
-                summary_candidates = [
-                    CompanyRecord(**r)
-                    for r in result.get("records", [])
-                    if (r.get("description") or "").strip() and len((r.get("description") or "").strip()) > 50
-                ]
-                summary_topic = task_meta.get("industry") or "the topic"
-                st.info(f"**{len(summary_candidates)} papers** ready — click to generate summaries.")
+        if not backends:
+            st.warning("⚠️ Add a free Groq or Gemini key in the sidebar to enable summaries.")
+        else:
+            summary_candidates: list[CompanyRecord] = []
+            for r in records:
+                description = _first_nonempty(r, [
+                    "description", "abstract", "summary", "snippet", "paper_abstract"
+                ])
+                if not description.strip():
+                    continue
 
-                if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
-                    status_holder = st.empty()
-
-                    def _summary_progress(msg: str):
-                        status_holder.caption(f"⏳ {msg}")
-
-                    summaries = summarize_papers(
-                        papers=summary_candidates,
-                        topic=summary_topic,
-                        llm=llm_client,
-                        max_papers=20,
-                        progress_callback=_summary_progress,
+                summary_candidates.append(
+                    CompanyRecord(
+                        company_name=_first_nonempty(r, [
+                            "company_name", "title", "paper_title", "document_title", "name"
+                        ]) or "Untitled",
+                        authors=_first_nonempty(r, [
+                            "authors", "author", "paper_authors", "creators", "creator"
+                        ]),
+                        description=description,
+                        doi=_first_nonempty(r, ["doi"]),
+                        website=_first_nonempty(r, [
+                            "website", "url", "paper_url", "source_url", "link"
+                        ]),
                     )
+                )
 
-                    st.session_state["paper_summaries"] = summaries
-                    st.session_state["summaries_topic"] = summary_topic
-                    status_holder.empty()
-                    st.success(f"✅ {len(summaries)} summaries ready — see below and download.")
+            summary_topic = task_meta.get("industry") or "the topic"
+            st.info(f"**{len(summary_candidates)} papers** ready — click to generate summaries.")
 
-            if st.session_state.get("paper_summaries"):
-                summaries = st.session_state["paper_summaries"]
-                topic = st.session_state.get("summaries_topic", "research")
+            if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
+                st.session_state["active_section"] = "summaries"
+                status_holder = st.empty()
 
-                for i, s in enumerate(summaries, 1):
-                    with st.expander(f"📄 {i}. {s['title'][:75]}", expanded=(i == 1)):
-                        meta = []
-                        if s.get("authors"):
-                            meta.append(f"👤 {s['authors']}")
-                        if s.get("doi"):
-                            meta.append(f"🔗 [{s['doi'][:60]}]({s['doi']})")
-                        if meta:
-                            st.caption("  ·  ".join(meta))
-                        st.markdown(s["summary"])
+                def _summary_progress(msg: str):
+                    status_holder.caption(f"⏳ {msg}")
 
-                md_bytes = summaries_to_markdown(summaries, topic).encode("utf-8")
-                txt_bytes = summaries_to_text(summaries, topic).encode("utf-8")
-                fn = topic[:30].replace(" ", "_")
+                summaries = summarize_papers(
+                    papers=summary_candidates,
+                    topic=summary_topic,
+                    llm=llm_client,
+                    max_papers=20,
+                    progress_callback=_summary_progress,
+                )
 
-                st.divider()
-                st.markdown("**⬇️ Download all summaries:**")
-                c1, c2 = st.columns(2)
+                st.session_state["paper_summaries"] = summaries
+                st.session_state["summaries_topic"] = summary_topic
+                status_holder.empty()
+                st.success(f"✅ {len(summaries)} summaries ready — see below and download.")
+
+        if st.session_state.get("paper_summaries"):
+            summaries = st.session_state["paper_summaries"]
+            topic = st.session_state.get("summaries_topic", "research")
+
+            for i, s in enumerate(summaries, 1):
+                with st.expander(f"📄 {i}. {s['title'][:75]}", expanded=(i == 1)):
+                    meta = []
+                    if s.get("authors"):
+                        meta.append(f"👤 {s['authors']}")
+                    if s.get("doi"):
+                        meta.append(f"🔗 {s['doi'][:80]}")
+                    if meta:
+                        st.caption("  ·  ".join(meta))
+                    st.markdown(s["summary"])
+
+            txt_bytes = summaries_to_text(summaries, topic).encode("utf-8")
+            pdf_bytes = summaries_to_pdf_bytes(summaries, topic)
+            fn = topic[:30].replace(" ", "_")
+
+            st.divider()
+            st.markdown("**⬇️ Download all summaries:**")
+            c1, c2 = st.columns(2)
+
+            if pdf_bytes:
                 c1.download_button(
-                    "📝 Markdown (.md)",
-                    data=md_bytes,
-                    file_name=f"summaries_{fn}.md",
-                    mime="text/markdown",
+                    "📑 PDF",
+                    data=pdf_bytes,
+                    file_name=f"summaries_{fn}.pdf",
+                    mime="application/pdf",
                     use_container_width=True,
                 )
-                c2.download_button(
-                    "📄 Text (.txt)",
-                    data=txt_bytes,
-                    file_name=f"summaries_{fn}.txt",
-                    mime="text/plain",
-                    use_container_width=True,
-                )
+            else:
+                c1.warning("Install reportlab to enable PDF summaries.")
 
-    # ── Download tab ───────────────────────────────────────────────────────
-    with tab_download:
+            c2.download_button(
+                "📄 Text (.txt)",
+                data=txt_bytes,
+                file_name=f"summaries_{fn}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+    elif selected_section == "download":
         st.markdown("### ⬇️ Download your results")
-        st.caption("All formats are available at once — click any button to download without losing your session.")
+        st.caption("Downloads are generated from the cleaned table shown in the app.")
 
         try:
             xl_buf = io.BytesIO()
@@ -925,15 +1150,12 @@ if result and task_meta:
             xl_bytes = None
 
         csv_bytes = df_display.to_csv(index=False).encode("utf-8")
-        json_bytes = df_display.to_json(orient="records", indent=2).encode("utf-8")
+        pdf_bytes = _df_to_pdf_bytes(
+            df_display,
+            title=f"Search Results - {task_meta.get('industry', 'Results')}",
+        )
 
-        ep = result.get("export_path", "")
-        pdf_bytes = None
-        if ep and Path(ep).exists() and ep.endswith(".pdf"):
-            with open(ep, "rb") as pf:
-                pdf_bytes = pf.read()
-
-        dl_col1, dl_col2, dl_col3, dl_col4 = st.columns(4)
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
 
         if xl_bytes:
             dl_col1.download_button(
@@ -943,6 +1165,7 @@ if result and task_meta:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+
         dl_col2.download_button(
             "📄 CSV (.csv)",
             data=csv_bytes,
@@ -950,28 +1173,23 @@ if result and task_meta:
             mime="text/csv",
             use_container_width=True,
         )
-        dl_col3.download_button(
-            "🔧 JSON (.json)",
-            data=json_bytes,
-            file_name=_normalize_filename(export_filename, "json"),
-            mime="application/json",
-            use_container_width=True,
-        )
+
         if pdf_bytes:
-            dl_col4.download_button(
+            dl_col3.download_button(
                 "📑 PDF",
                 data=pdf_bytes,
-                file_name=Path(ep).name,
+                file_name=_normalize_filename(export_filename, "pdf"),
                 mime="application/pdf",
                 use_container_width=True,
             )
+        else:
+            dl_col3.warning("Install reportlab to enable PDF export.")
 
         st.divider()
         st.dataframe(df_display.head(5), use_container_width=True)
         st.caption(f"Preview: first 5 of {len(df_display)} rows.")
 
-    # ── Details tab ────────────────────────────────────────────────────────
-    with tab_details:
+    elif selected_section == "details":
         st.markdown("### 🔍 Search details")
         st.caption("Technical details about how the search ran.")
 
