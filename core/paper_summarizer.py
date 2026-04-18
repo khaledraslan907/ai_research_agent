@@ -1,36 +1,91 @@
 """
 paper_summarizer.py
-===================
-Summarizes research papers using the LLM already available in the app pipeline.
+====================
+Enhanced research-paper summarizer.
 
-Each summary contains:
-  - Plain-English 3-sentence summary
-  - Key findings (bullet points)
-  - Relevance to the search topic
+Improvements:
+- More detailed summary structure
+- Better practitioner-focused output
+- Detects likely non-paper pages (journal homepages, author guides, portals)
+- Prevents wasting summary calls on weak results
 """
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List
 
 from core.models import CompanyRecord
 
 
-SUMMARY_PROMPT = """You are a research assistant. Summarize this paper for a petroleum engineer.
+SUMMARY_PROMPT = """You are a research assistant helping a petroleum engineer review papers quickly.
 
 Paper title: {title}
 Authors: {authors}
-Abstract: {abstract}
+Abstract / description: {abstract}
 Search topic: {topic}
 
-Write a summary with exactly this structure (keep it short):
+Write a concise but information-dense summary using exactly this structure:
 
-**What it's about:** (1 sentence, plain English, no jargon)
-**Key findings:** (2-3 bullet points, each under 15 words)
-**Relevant because:** (1 sentence linking to "{topic}")
+**Problem studied:** (1 sentence — what technical problem the paper addresses)
+**What they did:** (1-2 sentences — method, experiment, model, field trial, or review approach)
+**Main findings:**
+- (bullet 1: key result or conclusion)
+- (bullet 2: key result or conclusion)
+- (bullet 3: practical implication, limitation, or comparison)
 
-Be concise. No preamble.
+**Methods / data:** (1 sentence — data type, simulation, field data, experiment, review, or model)
+**Why it matters:** (1 sentence — why a petroleum engineer should care)
+
+Rules:
+- Be concrete, not generic
+- Prefer technical meaning over marketing language
+- If the abstract is vague, say what is clear and do not invent details
+- No preamble
 """
+
+
+_NON_PAPER_TITLE_HINTS = {
+    "journal", "for authors", "articles in press", "volume", "issue",
+    "homepage", "guide", "database", "submission", "editorial board",
+    "table of contents",
+}
+
+_NON_PAPER_BODY_HINTS = {
+    "submit your manuscript",
+    "for authors",
+    "aim and scope",
+    "editorial board",
+    "instructions for authors",
+    "quarterly journal",
+    "articles in press",
+    "browse volumes",
+    "journal homepage",
+    "subscription database",
+}
+
+
+def _norm_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def _looks_like_non_paper(title: str, abstract: str, doi_or_url: str) -> bool:
+    t = _norm_spaces((title or "").lower())
+    a = _norm_spaces((abstract or "").lower())
+    d = _norm_spaces((doi_or_url or "").lower())
+
+    if any(h in t for h in _NON_PAPER_TITLE_HINTS):
+        return True
+    if any(h in a for h in _NON_PAPER_BODY_HINTS):
+        return True
+    if "for-authors" in d or "articles-in-press" in d:
+        return True
+
+    # Very weak/generic descriptions are usually not individual papers
+    if len(a) < 80 and any(x in t for x in {"journal", "onepetro", "sciengine"}):
+        return True
+
+    return False
 
 
 def summarize_papers(
@@ -41,8 +96,9 @@ def summarize_papers(
     progress_callback=None,
 ) -> List[Dict]:
     """
-    Generate a plain-English summary for each paper using the provided LLM client.
-    Returns list of dicts with: title, authors, doi, summary, error
+    Generate a detailed plain-English summary for each paper using the provided LLM client.
+    Returns list of dicts with:
+      title, authors, doi, summary, error, skipped
     """
     results: List[Dict] = []
 
@@ -57,11 +113,11 @@ def summarize_papers(
     for i, paper in enumerate(filtered_papers):
         title = (paper.company_name or "Untitled").strip()
         authors = (paper.authors or "Unknown").strip()
-        abstract = (paper.description or "").strip()[:1500]
+        abstract = (paper.description or "").strip()[:2500]
         doi = (paper.doi or paper.website or "").strip()
 
         if progress_callback:
-            progress_callback(f"Summarizing {i + 1}/{len(filtered_papers)}: {title[:50]}...")
+            progress_callback(f"Summarizing {i + 1}/{len(filtered_papers)}: {title[:60]}...")
 
         if not abstract:
             results.append(
@@ -69,8 +125,25 @@ def summarize_papers(
                     "title": title,
                     "authors": authors,
                     "doi": doi,
-                    "summary": "No abstract available for this paper.",
+                    "summary": "No abstract or descriptive text was available for this result.",
                     "error": False,
+                    "skipped": True,
+                }
+            )
+            continue
+
+        if _looks_like_non_paper(title, abstract, doi):
+            results.append(
+                {
+                    "title": title,
+                    "authors": authors,
+                    "doi": doi,
+                    "summary": (
+                        "Skipped: this result appears to be a journal page, portal page, "
+                        "author-guide page, or other non-paper source rather than an individual paper."
+                    ),
+                    "error": False,
+                    "skipped": True,
                 }
             )
             continue
@@ -83,7 +156,7 @@ def summarize_papers(
         )
 
         try:
-            summary = llm.generate(prompt, timeout=30) or ""
+            summary = llm.generate(prompt, timeout=40) or ""
             summary = summary.strip()
             if not summary:
                 summary = "Summary could not be generated (LLM returned empty response)."
@@ -99,6 +172,7 @@ def summarize_papers(
                 "doi": doi,
                 "summary": summary,
                 "error": error,
+                "skipped": False,
             }
         )
 
@@ -109,7 +183,7 @@ def summaries_to_markdown(summaries: List[Dict], topic: str) -> str:
     """Convert summaries list to a downloadable Markdown document."""
     lines = [
         f"# Research Summaries: {topic}",
-        f"*{len(summaries)} papers summarized*",
+        f"*{len(summaries)} results summarized*",
         "",
     ]
 
@@ -122,6 +196,8 @@ def summaries_to_markdown(summaries: List[Dict], topic: str) -> str:
             lines.append(f"**Authors:** {s['authors']}")
         if s.get("doi"):
             lines.append(f"**Source:** {s['doi']}")
+        if s.get("skipped"):
+            lines.append(f"**Skipped:** {s['skipped']}")
         lines += ["", s.get("summary", ""), ""]
 
     return "\n".join(lines)
