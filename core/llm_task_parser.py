@@ -103,26 +103,16 @@ _CATEGORY_NOISE_TERMS = {
     "company", "companies", "vendor", "vendors", "provider", "providers",
 }
 
-# Exact-only allowed user-facing labels.
 _ALLOWED_SOLUTION_KEYWORDS = {
-    "machine learning",
-    "artificial intelligence",
-    "ai",
-    "analytics",
-    "monitoring",
-    "optimization",
-    "automation",
-    "iot",
-    "scada",
-    "digital twin",
-    "predictive maintenance",
+    "machine learning", "artificial intelligence", "ai", "analytics", "monitoring",
+    "optimization", "automation", "iot", "scada", "digital twin", "predictive maintenance",
 }
 
 _SOLUTION_KEYWORD_PATTERNS = {
     "machine learning": [r"\bmachine learning\b", r"\bml\b"],
     "artificial intelligence": [r"\bartificial intelligence\b"],
     "ai": [r"\bai\b"],
-    "analytics": [r"\banalytics\b", r"\banalytic\b"],
+    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
     "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
     "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
     "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
@@ -132,16 +122,37 @@ _SOLUTION_KEYWORD_PATTERNS = {
     "predictive maintenance": [r"\bpredictive maintenance\b"],
 }
 
+_ALLOWED_DOMAIN_KEYWORDS = {
+    "esp", "virtual flow metering", "well performance", "artificial lift",
+    "production optimization", "well surveillance", "multiphase metering",
+    "flow assurance", "production monitoring", "reservoir simulation",
+    "reservoir modeling", "drilling optimization", "production engineering",
+}
+
+_DOMAIN_KEYWORD_PATTERNS = {
+    "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
+    "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
+    "well performance": [r"\bwell performance\b"],
+    "artificial lift": [r"\bartificial lift\b"],
+    "production optimization": [r"\bproduction optimization\b", r"\bproduction optimisation\b"],
+    "well surveillance": [r"\bwell surveillance\b"],
+    "multiphase metering": [r"\bmultiphase metering\b", r"\bmultiphase meter\b"],
+    "flow assurance": [r"\bflow assurance\b"],
+    "production monitoring": [r"\bproduction monitoring\b"],
+    "reservoir simulation": [r"\breservoir simulation\b"],
+    "reservoir modeling": [r"\breservoir modeling\b", r"\breservoir modelling\b"],
+    "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
+    "production engineering": [r"\bproduction engineering\b"],
+}
+
 
 def parse_with_llm(prompt: str, llm: FreeLLMClient) -> Optional[TaskSpec]:
     if not llm.is_available():
         return None
-
     llm_prompt = INTENT_PARSE_PROMPT.format(prompt=prompt)
     result = llm.generate_json(llm_prompt, timeout=30)
     if not result or not isinstance(result, dict):
         return None
-
     return _dict_to_task_spec(prompt, result)
 
 
@@ -205,7 +216,6 @@ def _is_generic_document_topic(text: str) -> bool:
         return True
     if t in _GENERIC_DOC_TOPICS:
         return True
-
     words = [
         w for w in re.findall(r"[a-z0-9&+/.-]+", t)
         if w not in {"the", "a", "an", "of", "in", "for", "on", "and", "to", "with", "about"}
@@ -222,13 +232,11 @@ def _extract_document_topic_from_prompt(raw_prompt: str) -> str:
         m = re.search(pattern, prompt, flags=re.IGNORECASE)
         if not m:
             continue
-
         candidate = m.group(1)
         candidate = _strip_output_noise(candidate)
         candidate = _strip_broad_domain_tail(candidate)
         candidate = re.sub(r"^(?:the|a|an)\s+", "", candidate, flags=re.IGNORECASE)
         candidate = _norm_spaces(candidate.strip(" .,:;|-"))
-
         if candidate:
             return candidate
 
@@ -277,6 +285,25 @@ def _sanitize_solution_keywords(values: list[str]) -> list[str]:
     for v in values or []:
         s = str(v).strip().lower()
         if s in _ALLOWED_SOLUTION_KEYWORDS and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _extract_domain_keywords_from_prompt(prompt_lower: str) -> list[str]:
+    found = []
+    for label, pats in _DOMAIN_KEYWORD_PATTERNS.items():
+        if any(re.search(p, prompt_lower) for p in pats):
+            found.append(label)
+    return _dedupe_keep_order(found)
+
+
+def _sanitize_domain_keywords(values: list[str]) -> list[str]:
+    out = []
+    seen = set()
+    for v in values or []:
+        s = str(v).strip().lower()
+        if s in _ALLOWED_DOMAIN_KEYWORDS and s not in seen:
             seen.add(s)
             out.append(s)
     return out
@@ -387,7 +414,6 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
         exclude_presence_countries=excpres_countries,
         strict_mode=bool(include_countries or exclude_countries or excpres_countries),
     )
-
     if regex_spec:
         llm_geo = _clean_geography_with_regex(llm_geo, regex_spec.geography)
 
@@ -402,18 +428,23 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     if "website" not in attributes:
         attributes = ["website"] + [a for a in attributes if a != "website"]
 
-    # IMPORTANT:
-    # 1) Trust explicit prompt keywords first.
-    # 2) Use LLM solution_keywords only if user did not explicitly type any.
     prompt_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
     llm_solution_keywords = _sanitize_solution_keywords(data.get("solution_keywords", []) or [])
-
     if prompt_solution_keywords:
         solution_keywords = prompt_solution_keywords
     else:
         solution_keywords = llm_solution_keywords
         if not solution_keywords and regex_spec:
             solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or [])
+
+    prompt_domain_keywords = _extract_domain_keywords_from_prompt(prompt_lower)
+    llm_domain_keywords = _sanitize_domain_keywords(data.get("domain_keywords", []) or [])
+    if prompt_domain_keywords:
+        domain_keywords = prompt_domain_keywords
+    else:
+        domain_keywords = llm_domain_keywords
+        if not domain_keywords and regex_spec:
+            domain_keywords = list(getattr(regex_spec, "domain_keywords", []) or [])
 
     commercial_intent = str(data.get("commercial_intent", "") or "").strip().lower()
     if commercial_intent not in {"general", "agent_or_distributor", "reseller", "partner"}:
@@ -439,13 +470,11 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
         target_category=entity_category,
         industry=topic,
         solution_keywords=solution_keywords,
+        domain_keywords=domain_keywords,
         commercial_intent=commercial_intent,
         target_attributes=attributes,
         geography=llm_geo,
-        output=OutputSpec(
-            format=fmt,
-            filename=f"results.{fmt if fmt != 'ui_table' else 'xlsx'}",
-        ),
+        output=OutputSpec(format=fmt, filename=f"results.{fmt if fmt != 'ui_table' else 'xlsx'}"),
         credential_mode=CredentialMode(mode="free"),
         use_local_llm=False,
         use_cloud_llm=False,
@@ -474,13 +503,18 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     if not list(llm_spec.target_attributes or []):
         llm_spec.target_attributes = list(regex_spec.target_attributes or [])
 
-    # Exact prompt terms are source-of-truth. Do not inflate by unioning inferred keywords.
     prompt_lower = _norm_spaces(prompt).lower()
     prompt_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
     if prompt_solution_keywords:
         llm_spec.solution_keywords = prompt_solution_keywords
-    elif not list(llm_spec.solution_keywords or []):
-        llm_spec.solution_keywords = list(regex_spec.solution_keywords or [])
+    elif not list(getattr(llm_spec, "solution_keywords", []) or []):
+        llm_spec.solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or [])
+
+    prompt_domain_keywords = _extract_domain_keywords_from_prompt(prompt_lower)
+    if prompt_domain_keywords:
+        llm_spec.domain_keywords = prompt_domain_keywords
+    elif not list(getattr(llm_spec, "domain_keywords", []) or []):
+        llm_spec.domain_keywords = list(getattr(regex_spec, "domain_keywords", []) or [])
 
     if getattr(llm_spec, "commercial_intent", "general") == "general":
         llm_spec.commercial_intent = getattr(regex_spec, "commercial_intent", "general")
@@ -491,10 +525,7 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     return llm_spec
 
 
-def parse_task_prompt_llm_first(
-    prompt: str,
-    llm: Optional[FreeLLMClient] = None,
-) -> TaskSpec:
+def parse_task_prompt_llm_first(prompt: str, llm: Optional[FreeLLMClient] = None) -> TaskSpec:
     from core.task_parser import parse_task_prompt as _regex_parse
 
     regex_spec = _regex_parse(prompt)
