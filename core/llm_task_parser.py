@@ -1,21 +1,3 @@
-"""
-llm_task_parser.py
-==================
-LLM-powered intent parser with regex repair / merge.
-
-Main improvements in this version:
-- Preserves digital/software-company intent even when the LLM collapses the
-  topic to just "oil and gas"
-- Repairs overly broad document topics from the raw prompt
-- Treats phrases like "operate outside Egypt and USA" and
-  "do not have offices/branches/subsidiaries/local entities in ..."
-  as presence exclusion
-- Preserves solution keywords
-- Preserves commercial intent
-- Merges geography by union + conflict cleanup instead of only backfilling
-  missing fields
-"""
-
 from __future__ import annotations
 
 import re
@@ -121,9 +103,26 @@ _CATEGORY_NOISE_TERMS = {
     "company", "companies", "vendor", "vendors", "provider", "providers",
 }
 
+# Exact-only allowed user-facing labels.
+_ALLOWED_SOLUTION_KEYWORDS = {
+    "machine learning",
+    "artificial intelligence",
+    "ai",
+    "analytics",
+    "monitoring",
+    "optimization",
+    "automation",
+    "iot",
+    "scada",
+    "digital twin",
+    "predictive maintenance",
+}
+
 _SOLUTION_KEYWORD_PATTERNS = {
-    "ai": [r"\bai\b", r"\bartificial intelligence\b", r"\bmachine learning\b", r"\bml\b"],
-    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
+    "machine learning": [r"\bmachine learning\b", r"\bml\b"],
+    "artificial intelligence": [r"\bartificial intelligence\b"],
+    "ai": [r"\bai\b"],
+    "analytics": [r"\banalytics\b", r"\banalytic\b"],
     "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
     "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
     "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
@@ -269,7 +268,18 @@ def _extract_solution_keywords_from_prompt(prompt_lower: str) -> list[str]:
     for label, pats in _SOLUTION_KEYWORD_PATTERNS.items():
         if any(re.search(p, prompt_lower) for p in pats):
             found.append(label)
-    return found
+    return _dedupe_keep_order(found)
+
+
+def _sanitize_solution_keywords(values: list[str]) -> list[str]:
+    out = []
+    seen = set()
+    for v in values or []:
+        s = str(v).strip().lower()
+        if s in _ALLOWED_SOLUTION_KEYWORDS and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
 
 def _extract_commercial_intent_from_prompt(prompt_lower: str) -> str:
@@ -292,7 +302,6 @@ def _repair_topic(raw_prompt: str, topic: str, task_type: str, regex_topic: str 
                 return extracted
             if topic and topic.lower() in extracted.lower() and len(extracted.split()) >= len(topic.split()):
                 return extracted
-
         topic = _strip_broad_domain_tail(_strip_output_noise(topic))
         return topic or extracted
 
@@ -341,12 +350,8 @@ def _clean_geography_with_regex(llm_geo: GeographyRules, regex_geo: GeographyRul
 def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Optional[TaskSpec] = None) -> TaskSpec:
     task_type = data.get("task_type", "entity_discovery")
     if task_type not in {
-        "entity_discovery",
-        "entity_enrichment",
-        "similar_entity_expansion",
-        "market_research",
-        "document_research",
-        "people_search",
+        "entity_discovery", "entity_enrichment", "similar_entity_expansion",
+        "market_research", "document_research", "people_search",
     }:
         task_type = "entity_discovery"
 
@@ -389,7 +394,7 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     attrs_raw = data.get("attributes_wanted", []) or []
     valid_attrs = {
         "website", "email", "phone", "linkedin", "summary", "hq_country",
-        "presence_countries", "pdf", "author", "authors", "doi", "abstract"
+        "presence_countries", "pdf", "author", "authors", "doi", "abstract",
     }
     attributes = [a for a in attrs_raw if a in valid_attrs]
     if not attributes and regex_spec:
@@ -397,15 +402,18 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     if "website" not in attributes:
         attributes = ["website"] + [a for a in attributes if a != "website"]
 
-    llm_solution_keywords = data.get("solution_keywords", []) or []
-    llm_solution_keywords = [str(x).strip().lower() for x in llm_solution_keywords if str(x).strip()]
-    regex_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
-    if regex_spec:
-        for kw in list(regex_spec.solution_keywords or []):
-            if kw not in regex_solution_keywords:
-                regex_solution_keywords.append(kw)
+    # IMPORTANT:
+    # 1) Trust explicit prompt keywords first.
+    # 2) Use LLM solution_keywords only if user did not explicitly type any.
+    prompt_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
+    llm_solution_keywords = _sanitize_solution_keywords(data.get("solution_keywords", []) or [])
 
-    solution_keywords = _dedupe_keep_order(llm_solution_keywords + regex_solution_keywords)
+    if prompt_solution_keywords:
+        solution_keywords = prompt_solution_keywords
+    else:
+        solution_keywords = llm_solution_keywords
+        if not solution_keywords and regex_spec:
+            solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or [])
 
     commercial_intent = str(data.get("commercial_intent", "") or "").strip().lower()
     if commercial_intent not in {"general", "agent_or_distributor", "reseller", "partner"}:
@@ -466,14 +474,13 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     if not list(llm_spec.target_attributes or []):
         llm_spec.target_attributes = list(regex_spec.target_attributes or [])
 
-    if not list(llm_spec.solution_keywords or []):
+    # Exact prompt terms are source-of-truth. Do not inflate by unioning inferred keywords.
+    prompt_lower = _norm_spaces(prompt).lower()
+    prompt_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
+    if prompt_solution_keywords:
+        llm_spec.solution_keywords = prompt_solution_keywords
+    elif not list(llm_spec.solution_keywords or []):
         llm_spec.solution_keywords = list(regex_spec.solution_keywords or [])
-    else:
-        merged = list(llm_spec.solution_keywords or [])
-        for kw in list(regex_spec.solution_keywords or []):
-            if kw not in merged:
-                merged.append(kw)
-        llm_spec.solution_keywords = merged
 
     if getattr(llm_spec, "commercial_intent", "general") == "general":
         llm_spec.commercial_intent = getattr(regex_spec, "commercial_intent", "general")
@@ -488,9 +495,6 @@ def parse_task_prompt_llm_first(
     prompt: str,
     llm: Optional[FreeLLMClient] = None,
 ) -> TaskSpec:
-    """
-    Main entry point. Tries LLM first, then repairs/merges with the regex parser.
-    """
     from core.task_parser import parse_task_prompt as _regex_parse
 
     regex_spec = _regex_parse(prompt)
