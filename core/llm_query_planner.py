@@ -5,10 +5,8 @@ Generates targeted, diverse search queries.
 
 Main improvements in this version:
 - Uses target_category to bias discovery toward software/digital vendors
-  instead of generic oil & gas operators
-- Preserves document-research query quality from earlier versions
-- Adds stronger negative terms for search-engine style providers to reduce
-  rankings, news, directories, jobs, and other false positives
+- Uses solution_keywords to preserve technical focus
+- Uses commercial_intent to generate partner/distributor/reseller-style queries
 - Distinguishes include-country, exclude-country, and exclude-presence intent
 """
 
@@ -88,6 +86,18 @@ _TOPIC_ALIAS_RULES = [
     ),
 ]
 
+_SOLUTION_SYNONYMS = {
+    "ai": ["AI", "artificial intelligence", "machine learning"],
+    "analytics": ["analytics", "analytic platform"],
+    "monitoring": ["monitoring", "remote monitoring"],
+    "optimization": ["optimization", "optimisation"],
+    "automation": ["automation", "automated"],
+    "iot": ["IoT", "internet of things"],
+    "scada": ["SCADA"],
+    "digital twin": ["digital twin"],
+    "predictive maintenance": ["predictive maintenance"],
+}
+
 
 def plan_queries(task_spec: TaskSpec, llm=None) -> Dict[str, List[SearchQuery]]:
     """
@@ -108,8 +118,8 @@ def plan_queries(task_spec: TaskSpec, llm=None) -> Dict[str, List[SearchQuery]]:
                 for provider in ("ddg", "exa", "tavily", "serpapi"):
                     llm_q = llm_result.get(provider, [])
                     tmpl_q = templates.get(provider, [])
-                    seen = {q.text.lower()[:100] for q in llm_q}
-                    extras = [q for q in tmpl_q if q.text.lower()[:100] not in seen]
+                    seen = {q.text.lower()[:120] for q in llm_q}
+                    extras = [q for q in tmpl_q if q.text.lower()[:120] not in seen]
                     merged[provider] = llm_q + extras
                 return merged
         except Exception:
@@ -239,22 +249,50 @@ def _topic_aliases(topic: str) -> List[str]:
     return out
 
 
+def _solution_terms(task_spec: TaskSpec) -> List[str]:
+    out: List[str] = []
+    for kw in (getattr(task_spec, "solution_keywords", []) or []):
+        key = str(kw).strip().lower()
+        if not key:
+            continue
+        for synonym in _SOLUTION_SYNONYMS.get(key, [key]):
+            if synonym.lower() not in {x.lower() for x in out}:
+                out.append(synonym)
+    return out[:6]
+
+
+def _commercial_terms(task_spec: TaskSpec) -> List[str]:
+    ci = (getattr(task_spec, "commercial_intent", "general") or "general").strip().lower()
+    if ci == "agent_or_distributor":
+        return ["distributor", "local representative", "channel partner", "reseller"]
+    if ci == "reseller":
+        return ["reseller", "channel partner", "partner program"]
+    if ci == "partner":
+        return ["partner", "channel partner", "partner program", "alliance"]
+    return []
+
+
 def _category_profile(task_spec: TaskSpec) -> dict:
     category = getattr(task_spec, "target_category", "general") or "general"
+    solution_terms = _solution_terms(task_spec)
 
     if category == "software_company":
+        variants = [
+            "digital company",
+            "software company",
+            "technology vendor",
+            "platform provider",
+            "analytics company",
+            "automation company",
+            "AI company",
+            "IoT company",
+        ]
+        if solution_terms:
+            variants.extend(solution_terms[:3])
+
         return {
             "entity_kw": "software company",
-            "variants": [
-                "digital company",
-                "software company",
-                "technology vendor",
-                "platform provider",
-                "analytics company",
-                "automation company",
-                "AI company",
-                "IoT company",
-            ],
+            "variants": variants,
             "subsegments": ["software", "platform", "analytics", "automation", "SCADA", "IoT"],
             "semantic_prefix": "B2B digital, software, AI, analytics, automation, SCADA and IoT vendors",
             "serp_negatives": '-jobs -job -career -careers -news -article -blog -wiki -directory -ranking -stock -marketcap -market-cap -price -photo -images',
@@ -303,6 +341,8 @@ def _plan_with_llm(task_spec: TaskSpec, llm) -> Dict[str, List[SearchQuery]]:
     inc_c = task_spec.geography.include_countries or []
     exc_c = task_spec.geography.exclude_countries or []
     exc_presence = task_spec.geography.exclude_presence_countries or []
+    solution_terms = _solution_terms(task_spec)
+    commercial_terms = _commercial_terms(task_spec)
 
     profile = _category_profile(task_spec)
     category_desc = getattr(task_spec, "target_category", "general") or "general"
@@ -314,7 +354,10 @@ def _plan_with_llm(task_spec: TaskSpec, llm) -> Dict[str, List[SearchQuery]]:
         entity_type=ent_type,
         include_countries=", ".join(inc_c) if inc_c else "any",
         exclude_countries=", ".join(exc_c) if exc_c else "none",
-        topic_words=" ".join(topic.split()[:6]),
+        exclude_presence_countries=", ".join(exc_presence) if exc_presence else "none",
+        solution_keywords=", ".join(solution_terms) if solution_terms else "none",
+        commercial_intent=(getattr(task_spec, "commercial_intent", "general") or "general"),
+        topic_words=" ".join((topic.split() + solution_terms + commercial_terms)[:8]),
     )
 
     raw = llm.generate_json(prompt, timeout=40)
@@ -346,10 +389,11 @@ def _plan_with_llm(task_spec: TaskSpec, llm) -> Dict[str, List[SearchQuery]]:
 def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str, List[SearchQuery]]:
     topic = _clean_topic(task_spec.industry or "", task_spec.raw_prompt or "")
     task_type = task_spec.task_type
-    ent_type = (task_spec.target_entity_types or ["company"])[0]
     inc_c = task_spec.geography.include_countries or []
     exc_c = task_spec.geography.exclude_countries or []
     exc_presence = task_spec.geography.exclude_presence_countries or []
+    solution_terms = _solution_terms(task_spec)
+    commercial_terms = _commercial_terms(task_spec)
 
     if task_type == "document_research":
         return _paper_queries(topic, raw_prompt=task_spec.raw_prompt or "", max_results=max_results)
@@ -376,8 +420,9 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
     ddg_queries: List[SearchQuery] = []
     p = 1
 
+    ddg_angles = variants[:3] + solution_terms[:2] + commercial_terms[:1]
     for geo in geo_anchors:
-        for variant in variants[:3]:
+        for variant in ddg_angles[:4]:
             ddg_queries.append(
                 SearchQuery(
                     text=f"{topic} {variant} {geo}",
@@ -395,8 +440,12 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
             og_topic = any(w in topic.lower() for w in ["oil", "gas", "petroleum", "energy"])
             segs = _OG_SUBSEGMENTS[:n_subsegments] if og_topic else profile["subsegments"][:n_subsegments]
 
+        for extra in solution_terms[:2]:
+            if extra.lower() not in {s.lower() for s in segs}:
+                segs.append(extra)
+
         primary_geo = inc_c[0] if inc_c else geo_anchors[0]
-        for seg in segs:
+        for seg in segs[: max(4, n_subsegments + 2)]:
             ddg_queries.append(
                 SearchQuery(
                     text=f"{topic} {seg} {entity_kw} {primary_geo}",
@@ -407,19 +456,18 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
             )
             p += 1
 
-    if max_results >= 50:
-        extra_regions = _REGIONS_EUROPE[:3] if not inc_c else inc_c[1:4]
-        for geo in extra_regions:
-            if geo not in geo_anchors:
-                ddg_queries.append(
-                    SearchQuery(
-                        text=f"{topic} {entity_kw} {geo}",
-                        priority=p,
-                        family="extra",
-                        provider_hint="ddg",
-                    )
+    if commercial_terms:
+        primary_geo = inc_c[0] if inc_c else "europe"
+        for cterm in commercial_terms[:2]:
+            ddg_queries.append(
+                SearchQuery(
+                    text=f"{topic} {entity_kw} {cterm} {primary_geo}",
+                    priority=p,
+                    family="commercial",
+                    provider_hint="ddg",
                 )
-                p += 1
+            )
+            p += 1
 
     exa_queries: List[SearchQuery] = []
     geo_desc = _geography_description(task_spec, inc_c, exc_c, exc_presence)
@@ -429,6 +477,11 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
         f"{profile['semantic_prefix']} for the {topic} sector, {geo_desc}",
         f"{topic} vendors, providers and companies {geo_desc}",
     ]
+
+    if solution_terms:
+        exa_sentences.append(
+            f"{topic} companies focused on {', '.join(solution_terms[:4])}, {geo_desc}"
+        )
 
     if getattr(task_spec, "target_category", "general") == "software_company":
         exa_sentences.extend([
@@ -441,10 +494,11 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
             f"specialized companies serving {topic} operators, {geo_desc}",
         ])
 
-    if max_results >= 50:
-        extra_geos = inc_c if inc_c else ["Europe", "Middle East", "Asia Pacific", "Canada", "Australia"]
-        for geo in extra_geos[:3]:
-            exa_sentences.append(f"Leading {topic} {entity_kw} and vendors in {geo}")
+    if commercial_terms:
+        exa_sentences.extend([
+            f"{topic} vendors with partner programs, distributors, resellers, or regional representatives, {geo_desc}",
+            f"{topic} software companies suitable for local representation and channel partnerships, {geo_desc}",
+        ])
 
     for i, sentence in enumerate(exa_sentences, start=1):
         exa_queries.append(
@@ -471,6 +525,10 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
         f"Which {topic} vendors and providers are leading {geo_q}?",
         f"Who provides the best {topic} technology solutions {geo_q}?",
     ]
+    if solution_terms:
+        tavily_base.append(
+            f"Which {topic} companies specialize in {', '.join(solution_terms[:3])} {geo_q}?"
+        )
     if getattr(task_spec, "target_category", "general") == "software_company":
         tavily_base.extend([
             f"What are the best {topic} software platforms available {geo_q}?",
@@ -479,34 +537,28 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
     else:
         tavily_base.append(f"What are the best {topic} companies available {geo_q}?")
 
-    if max_results >= 50:
-        tavily_base += [
-            f"Which {topic} companies are known in Europe and UK?",
-            f"What are the emerging {topic} startups {geo_q}?",
-        ]
-
-    for i, q in enumerate(tavily_base, start=1):
-        tavily_queries.append(
-            SearchQuery(
-                text=re.sub(r"\s+", " ", q.strip()),
-                priority=i,
-                family="question",
-                provider_hint="tavily",
-            )
-        )
+    if commercial_terms:
+        tavily_base.extend([
+            f"Which {topic} software vendors have partner programs or distributor networks {geo_q}?",
+            f"What {topic} vendors could be represented by local agents or resellers {geo_q}?",
+        ])
 
     serpapi_queries: List[SearchQuery] = []
     neg = profile["serp_negatives"]
-    if "usa" in exc_c or "usa" in exc_presence:
+    excluded = {c.lower() for c in exc_c + exc_presence}
+    if "usa" in excluded or "united states" in excluded:
         neg += ' -"houston" -"texas" -"united states" -"new york"'
-    if "egypt" in exc_c or "egypt" in exc_presence:
+    if "egypt" in excluded:
         neg += ' -"cairo" -"egypt"'
 
     geo_kw = inc_c[0] if inc_c else ""
+    kw1 = solution_terms[0] if solution_terms else "software"
+    kw2 = solution_terms[1] if len(solution_terms) > 1 else "platform"
+
     if getattr(task_spec, "target_category", "general") == "software_company":
         serp_base = [
-            f'"{topic}" software company {geo_kw} {neg}'.strip(),
-            f'"{topic}" digital platform vendor europe {neg}'.strip(),
+            f'"{topic}" "{kw1}" software company {geo_kw} {neg}'.strip(),
+            f'"{topic}" "{kw2}" technology vendor europe {neg}'.strip(),
             f'"{topic}" analytics company canada {neg}'.strip(),
             f'"{topic}" automation company australia {neg}'.strip(),
         ]
@@ -517,6 +569,12 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
             f"best {topic} technology {geo_kw} {neg}".strip(),
             f"{topic} software provider europe {neg}".strip(),
         ]
+
+    if commercial_terms:
+        serp_base.extend([
+            f'"{topic}" software company distributor OR reseller OR "partner program" {neg}'.strip(),
+            f'"{topic}" vendor "channel partner" OR representative {neg}'.strip(),
+        ])
 
     for i, q in enumerate(serp_base, start=1):
         serpapi_queries.append(
@@ -537,9 +595,6 @@ def _plan_from_templates(task_spec: TaskSpec, max_results: int = 25) -> Dict[str
 
 
 def _paper_queries(topic: str, raw_prompt: str = "", max_results: int = 25) -> Dict[str, List[SearchQuery]]:
-    """
-    Targeted academic/document queries for engineering and petroleum literature.
-    """
     topic = _clean_topic(topic, raw_prompt)
     aliases = _topic_aliases(topic)
     a1 = aliases[0]
@@ -586,12 +641,6 @@ def _paper_queries(topic: str, raw_prompt: str = "", max_results: int = 25) -> D
         exa_sentences += [
             f"Research papers on sucker rod pump systems covering rod lift design, pump fillage, dynamometer cards, and production optimization.",
             f"Technical studies on rod pump failures, diagnostics, and artificial lift performance in petroleum wells.",
-        ]
-
-    if max_results >= 50:
-        exa_sentences += [
-            f"Review papers and comparative studies on {topic} methods, field performance, and operating parameters.",
-            f"Laboratory, modeling, and field-validation studies on {topic} in petroleum engineering.",
         ]
 
     exa = [
@@ -641,9 +690,6 @@ def _paper_queries(topic: str, raw_prompt: str = "", max_results: int = 25) -> D
 
 
 def _people_queries(topic: str, task_spec: TaskSpec, max_results: int = 25) -> Dict[str, List[SearchQuery]]:
-    """
-    LinkedIn people search queries.
-    """
     from core.people_search import build_linkedin_queries
 
     people_noise = {
