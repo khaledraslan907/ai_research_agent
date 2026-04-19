@@ -8,38 +8,81 @@ import tldextract
 
 
 def extract_domain(url: str) -> str:
+    """
+    Canonical registrable domain extractor.
+
+    Examples:
+    - https://www.company.com/about      -> company.com
+    - company.com/contact                -> company.com
+    - uk.company.co.uk/page              -> company.co.uk
+    - WWW2.EXAMPLE.ORG                   -> example.org
+    """
     if not url:
         return ""
+
+    raw = (url or "").strip().lower()
+    if not raw:
+        return ""
+
     try:
-        ext = tldextract.extract(url)
+        # Ensure parseable input
+        parsed_input = raw if "://" in raw else f"https://{raw}"
+        ext = tldextract.extract(parsed_input)
         if ext.domain and ext.suffix:
-            return f"{ext.domain}.{ext.suffix}".lower()
+            return f"{ext.domain}.{ext.suffix}".lower().strip()
     except Exception:
         pass
+
     try:
-        parsed = urlparse(url if "://" in url else f"https://{url}")
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
         host = parsed.netloc or parsed.path
-        host = re.sub(r"^www\.", "", host).split(":")[0]
-        return host.lower()
+        host = host.lower().strip()
+        host = re.sub(r"^www\d*\.", "", host)
+        host = host.split(":")[0].split("/")[0].split("?")[0].split("#")[0].strip().rstrip(".")
+        return host
     except Exception:
         return ""
 
 
 def normalize_url(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
+    """
+    Canonical URL normalizer for dedup / display.
+    Keeps path, but normalizes:
+    - missing scheme -> https
+    - http -> https
+    - strips www/www2
+    - strips query / fragment
+    - strips trailing slash
+    """
+    raw = (url or "").strip()
+    if not raw:
         return ""
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url.rstrip("/")
+
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+
+    try:
+        parsed = urlparse(raw)
+        scheme = "https"
+        host = (parsed.netloc or parsed.path).lower().strip()
+        host = re.sub(r"^www\d*\.", "", host)
+        host = host.split(":")[0].strip().rstrip(".")
+        path = (parsed.path or "").strip()
+        if path == "/":
+            path = ""
+        normalized = f"{scheme}://{host}{path}"
+        return normalized.rstrip("/")
+    except Exception:
+        return raw.rstrip("/")
 
 
 def get_root_url(url: str) -> str:
     try:
-        parsed = urlparse(url)
+        normalized = normalize_url(url)
+        parsed = urlparse(normalized)
         return f"{parsed.scheme}://{parsed.netloc}"
     except Exception:
-        return url
+        return normalize_url(url)
 
 
 def join_url(base: str, path: str) -> str:
@@ -106,12 +149,35 @@ def extract_phones(text: str) -> List[str]:
 
 
 def unique_list(lst: list) -> list:
+    """
+    Generic unique-preserving order helper with light canonicalization.
+    Useful for mixed lists of strings like domains, URLs, countries, keywords.
+    """
     seen, result = set(), []
+
     for item in lst:
-        key = str(item).lower().strip()
+        if item is None:
+            continue
+
+        raw = str(item).strip()
+        if not raw:
+            continue
+
+        low = raw.lower()
+
+        # URL-like
+        if low.startswith(("http://", "https://")) or "/" in low:
+            key = normalize_url(raw)
+        # domain-like
+        elif "." in low and " " not in low:
+            key = extract_domain(raw) or low
+        else:
+            key = low.strip()
+
         if key and key not in seen:
             seen.add(key)
             result.append(item)
+
     return result
 
 
