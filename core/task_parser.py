@@ -157,6 +157,18 @@ DOMAIN_KEYWORD_PATTERNS = {
     "production engineering": [r"\bproduction engineering\b"],
 }
 
+# critical short aliases
+GEO_ALIAS_MAP = {
+    "uk": "united kingdom",
+    "u.k.": "united kingdom",
+    "uae": "united arab emirates",
+    "u.a.e.": "united arab emirates",
+    "usa": "united states",
+    "u.s.a.": "united states",
+    "u.s.": "united states",
+    "us": "united states",
+}
+
 NEGATIVE_GEO_CUES = [
     "no ", "not ", "without ", "exclude", "excluding", "except",
     "reject", "remove", "outside", "avoid", "other than",
@@ -209,16 +221,52 @@ def _dedupe_keep_order(items: List[str]) -> List[str]:
     return out
 
 
+def _dedupe_repeated_prompt(prompt: str) -> str:
+    """
+    If the exact same prompt is accidentally pasted twice back-to-back,
+    keep only one copy.
+    """
+    raw = (prompt or "").strip()
+    if not raw:
+        return raw
+
+    half = len(raw) // 2
+    left = raw[:half].strip()
+    right = raw[half:].strip()
+
+    if left and right and left == right:
+        return left
+
+    if len(raw) > 40:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+        deduped = []
+        prev = None
+        for s in sentences:
+            if prev is not None and s == prev:
+                continue
+            deduped.append(s)
+            prev = s
+        return " ".join(deduped)
+
+    return raw
+
+
 def _expand_geo_name(name: str) -> List[str]:
     name = (name or "").strip().lower()
     if not name:
         return []
+
+    if name in GEO_ALIAS_MAP:
+        return [GEO_ALIAS_MAP[name]]
+
     expanded = expand_region_name(name)
     if expanded:
         return list(expanded)
+
     norm = normalize_country_name(name)
     if norm:
         return [norm]
+
     return []
 
 
@@ -228,16 +276,26 @@ def _find_geo_tokens_in_text(text: str) -> List[str]:
         return []
 
     found: List[str] = []
-    all_geo_tokens = sorted(all_country_names() + list(_ALL_REGIONS), key=len, reverse=True)
+    all_geo_tokens = sorted(
+        all_country_names() + list(_ALL_REGIONS) + list(GEO_ALIAS_MAP.keys()),
+        key=len,
+        reverse=True,
+    )
+
     for item in all_geo_tokens:
         if re.search(r"\b" + re.escape(item) + r"\b", text):
             found.append(item)
+
     return _dedupe_keep_order(found)
 
 
 def _find_geo_after_marker(prompt_lower: str, marker_patterns: List[str], mode: str = "generic") -> List[str]:
     found: List[str] = []
-    all_geo_tokens = sorted(all_country_names() + list(_ALL_REGIONS), key=len, reverse=True)
+    all_geo_tokens = sorted(
+        all_country_names() + list(_ALL_REGIONS) + list(GEO_ALIAS_MAP.keys()),
+        key=len,
+        reverse=True,
+    )
 
     for marker in marker_patterns:
         for item in all_geo_tokens:
@@ -273,7 +331,7 @@ def _looks_like_presence_exclusion(prompt_lower: str) -> bool:
     presence_patterns = [
         r"\boperate(?:s|d|ing)?\s+outside\b",
         r"\bwork(?:s|ed|ing)?\s+outside\b",
-        r"\bserv(?:e|es|ed|ing)\s+outside\b",
+        r"\bserv(?:e|es|ed|ing)?\s+outside\b",
         r"\bactive\s+outside\b",
         r"\bpresent\s+outside\b",
         r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
@@ -326,12 +384,12 @@ def _extract_geo_from_negative_phrases(prompt_lower: str) -> List[str]:
 
 def _extract_geo_from_positive_in_phrases(prompt_lower: str) -> List[str]:
     """
-    Catch generic positive geography lists like:
+    Catch positive geography lists like:
     - software in Norway, UK, UAE, and Saudi Arabia
     - operations in Australia, Canada, and the UK
-    - vendors in Europe, GCC, Canada, and Australia
 
-    Only scans the positive part before exclusion language begins.
+    Only scans text before exclusion language begins, and only within
+    short sentence-bounded spans to avoid negative-cue bleed.
     """
     found: List[str] = []
 
@@ -342,21 +400,29 @@ def _extract_geo_from_positive_in_phrases(prompt_lower: str) -> List[str]:
         flags=re.IGNORECASE,
     )[0]
 
-    for m in re.finditer(r"\bin\s+([a-zA-Z\s,\-]+)", positive_part, flags=re.IGNORECASE):
-        span = m.group(1)
-        span = re.split(
-            r"\b(?:with|that|which|who|providing|offering|suitable|return|keep|only|excluding|exclude)\b",
-            span,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0].strip()
+    candidate_spans = re.split(r"[.;:!?]", positive_part)
 
-        geo_tokens = _find_geo_tokens_in_text(span)
-        if not geo_tokens:
+    for sentence in candidate_spans:
+        sentence = sentence.strip()
+        if not sentence:
             continue
 
-        for token in geo_tokens:
-            found.extend(_expand_geo_name(token))
+        for m in re.finditer(r"\bin\s+([a-zA-Z\s,\-]+)", sentence, flags=re.IGNORECASE):
+            span = m.group(1)
+
+            span = re.split(
+                r"\b(?:with|that|which|who|providing|offering|suitable|return|keep|only|where)\b",
+                span,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip()
+
+            geo_tokens = _find_geo_tokens_in_text(span)
+            if not geo_tokens:
+                continue
+
+            for token in geo_tokens:
+                found.extend(_expand_geo_name(token))
 
     return _dedupe_keep_order(found)
 
@@ -438,8 +504,7 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
                 (NEGATIVE_CUE_RE.search(left) and PRESENCE_NOUN_RE.search(window))
                 or re.search(
                     r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities)\b\s+in\s+"
-                    + re.escape(country)
-                    + r"\b",
+                    + re.escape(country) + r"\b",
                     window,
                 )
                 or re.search(
@@ -464,7 +529,7 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
 
     include = [c for c in include if c not in exclude and c not in exclude_presence]
 
-    # additional protection
+    # hard protection: never let an explicitly included country remain in excludes
     exclude_presence = [c for c in exclude_presence if c not in include]
     exclude = [c for c in exclude if c not in include]
     exclude = [c for c in exclude if c not in exclude_presence]
@@ -814,7 +879,7 @@ def _extract_max_results(prompt: str) -> int:
 
 
 def parse_task_prompt(prompt: str) -> TaskSpec:
-    prompt = (prompt or "").strip()
+    prompt = _dedupe_repeated_prompt((prompt or "").strip())
     prompt_lower = _normalize(prompt)
 
     task_type = _extract_task_type(prompt_lower)
