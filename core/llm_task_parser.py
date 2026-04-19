@@ -1,3 +1,21 @@
+"""
+llm_task_parser.py
+==================
+LLM-powered intent parser with regex repair / merge.
+
+Main improvements in this version:
+- Preserves digital/software-company intent even when the LLM collapses the
+  topic to just "oil and gas"
+- Repairs overly broad document topics from the raw prompt
+- Treats phrases like "operate outside Egypt and USA" and
+  "do not have offices/branches/subsidiaries/local entities in ..."
+  as presence exclusion
+- Preserves solution keywords
+- Preserves commercial intent
+- Merges geography by union + conflict cleanup instead of only backfilling
+  missing fields
+"""
+
 from __future__ import annotations
 
 import re
@@ -101,6 +119,18 @@ _CATEGORY_NOISE_TERMS = {
     "platforms", "saas", "cloud", "ai", "artificial intelligence", "machine learning",
     "data", "iot", "scada", "monitoring", "optimization", "optimisation",
     "company", "companies", "vendor", "vendors", "provider", "providers",
+}
+
+_SOLUTION_KEYWORD_PATTERNS = {
+    "ai": [r"\bai\b", r"\bartificial intelligence\b", r"\bmachine learning\b", r"\bml\b"],
+    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
+    "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
+    "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
+    "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
+    "iot": [r"\biot\b", r"\binternet of things\b"],
+    "scada": [r"\bscada\b"],
+    "digital twin": [r"\bdigital twin\b", r"\bdigital twins\b"],
+    "predictive maintenance": [r"\bpredictive maintenance\b"],
 }
 
 
@@ -234,6 +264,24 @@ def _looks_like_category_polluted_topic(text: str) -> bool:
     return any(term in t for term in _CATEGORY_NOISE_TERMS)
 
 
+def _extract_solution_keywords_from_prompt(prompt_lower: str) -> list[str]:
+    found = []
+    for label, pats in _SOLUTION_KEYWORD_PATTERNS.items():
+        if any(re.search(p, prompt_lower) for p in pats):
+            found.append(label)
+    return found
+
+
+def _extract_commercial_intent_from_prompt(prompt_lower: str) -> str:
+    if re.search(r"\b(agent|agency|distributor|distribution|local representation|representative|representation)\b", prompt_lower):
+        return "agent_or_distributor"
+    if re.search(r"\b(reseller|resellers)\b", prompt_lower):
+        return "reseller"
+    if re.search(r"\b(partner|partners|channel partner|channel partners)\b", prompt_lower):
+        return "partner"
+    return "general"
+
+
 def _repair_topic(raw_prompt: str, topic: str, task_type: str, regex_topic: str = "") -> str:
     topic = _norm_spaces(topic)
 
@@ -349,6 +397,26 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     if "website" not in attributes:
         attributes = ["website"] + [a for a in attributes if a != "website"]
 
+    llm_solution_keywords = data.get("solution_keywords", []) or []
+    llm_solution_keywords = [str(x).strip().lower() for x in llm_solution_keywords if str(x).strip()]
+    regex_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
+    if regex_spec:
+        for kw in list(regex_spec.solution_keywords or []):
+            if kw not in regex_solution_keywords:
+                regex_solution_keywords.append(kw)
+
+    solution_keywords = _dedupe_keep_order(llm_solution_keywords + regex_solution_keywords)
+
+    commercial_intent = str(data.get("commercial_intent", "") or "").strip().lower()
+    if commercial_intent not in {"general", "agent_or_distributor", "reseller", "partner"}:
+        commercial_intent = "general"
+
+    regex_commercial_intent = _extract_commercial_intent_from_prompt(prompt_lower)
+    if commercial_intent == "general" and regex_spec and getattr(regex_spec, "commercial_intent", "general") != "general":
+        commercial_intent = regex_spec.commercial_intent
+    elif commercial_intent == "general" and regex_commercial_intent != "general":
+        commercial_intent = regex_commercial_intent
+
     fmt = data.get("output_format", "xlsx")
     if fmt not in {"xlsx", "csv", "json", "pdf", "ui_table"}:
         fmt = "xlsx"
@@ -362,6 +430,8 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
         target_entity_types=[entity_type],
         target_category=entity_category,
         industry=topic,
+        solution_keywords=solution_keywords,
+        commercial_intent=commercial_intent,
         target_attributes=attributes,
         geography=llm_geo,
         output=OutputSpec(
@@ -377,10 +447,6 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
 
 
 def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec) -> TaskSpec:
-    """
-    Fill gaps in the LLM parse with strong regex signals.
-    """
-    # Prefer regex if the LLM left the topic blank or too generic.
     if not getattr(llm_spec, "industry", "").strip():
         llm_spec.industry = regex_spec.industry
     elif llm_spec.task_type == "document_research" and _is_generic_document_topic(llm_spec.industry):
@@ -389,20 +455,28 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
         repaired = _normalize_entity_topic(llm_spec.industry)
         llm_spec.industry = regex_spec.industry if repaired == regex_spec.industry else repaired
 
-    # Strengthen category when regex confidently detects software/service company
     if getattr(llm_spec, "target_category", "general") == "general" and getattr(regex_spec, "target_category", "general") != "general":
         llm_spec.target_category = regex_spec.target_category
 
-    # Geography merge: union + conflict cleanup, not just "fill missing"
     llm_spec.geography = _clean_geography_with_regex(llm_spec.geography, regex_spec.geography)
 
-    # If LLM missed a more specific task type, allow regex to upgrade it.
     if llm_spec.task_type == "entity_discovery" and regex_spec.task_type in {"document_research", "people_search", "market_research"}:
         llm_spec.task_type = regex_spec.task_type
 
-    # Use regex attributes when LLM returned almost nothing.
     if not list(llm_spec.target_attributes or []):
         llm_spec.target_attributes = list(regex_spec.target_attributes or [])
+
+    if not list(llm_spec.solution_keywords or []):
+        llm_spec.solution_keywords = list(regex_spec.solution_keywords or [])
+    else:
+        merged = list(llm_spec.solution_keywords or [])
+        for kw in list(regex_spec.solution_keywords or []):
+            if kw not in merged:
+                merged.append(kw)
+        llm_spec.solution_keywords = merged
+
+    if getattr(llm_spec, "commercial_intent", "general") == "general":
+        llm_spec.commercial_intent = getattr(regex_spec, "commercial_intent", "general")
 
     if not getattr(llm_spec, "max_results", 0):
         llm_spec.max_results = regex_spec.max_results
