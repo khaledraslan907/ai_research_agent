@@ -2,18 +2,6 @@
 prompt_templates.py
 ===================
 Single source of truth for every LLM prompt in the agent.
-
-Why this file exists:
-  - Prompts scattered across provider files are impossible to tune
-  - Version-tagged prompts let you A/B test improvements
-  - Jinja-style {placeholders} make substitution explicit and auditable
-  - All prompts follow the same output contract: valid JSON, no markdown fences
-
-Editing guide:
-  - Each prompt ends with "Return ONLY valid JSON. No explanation."
-  - Keep prompts short — Groq/Gemini free tiers have token limits
-  - Use UPPERCASE for critical rules inside prompts (they stand out to LLMs)
-  - Test changes with: python -m core.prompt_templates
 """
 
 from __future__ import annotations
@@ -21,8 +9,6 @@ from __future__ import annotations
 
 # ---------------------------------------------------------------------------
 # INTENT PARSING
-# Converts raw user prompt → structured TaskSpec JSON
-# Used by: core/llm_task_parser.py
 # ---------------------------------------------------------------------------
 
 INTENT_PARSE_PROMPT = """You are an AI research agent that understands what users want to find.
@@ -31,34 +17,45 @@ User request: "{prompt}"
 
 Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
 {{
-  "task_type": "entity_discovery" | "document_research" | "entity_enrichment" | "similar_entity_expansion" | "market_research",
+  "task_type": "entity_discovery" | "document_research" | "entity_enrichment" | "similar_entity_expansion" | "market_research" | "people_search",
   "entity_type": "company" | "paper" | "person" | "organization" | "event" | "product",
   "entity_category": "service_company" | "software_company" | "general",
-  "topic": "<the core subject being searched, e.g. oil and gas, CCS, renewable energy>",
-  "include_countries": ["list of countries to search IN, empty if none"],
-  "exclude_countries": ["list of countries to EXCLUDE from HQ/headquarters, empty if none"],
-  "exclude_presence_countries": ["countries where company must NOT have offices, empty if none"],
-  "attributes_wanted": ["website","email","phone","linkedin","summary","hq_country"],
+  "topic": "<industry or subject only, e.g. oil and gas, CCS, renewable energy>",
+  "solution_keywords": ["ai","analytics","monitoring","optimization","automation","iot","scada","digital twin","predictive maintenance"],
+  "commercial_intent": "general" | "agent_or_distributor" | "reseller" | "partner",
+  "include_countries": ["countries to search IN, empty if none"],
+  "exclude_countries": ["countries to exclude by HQ / headquarters, empty if none"],
+  "exclude_presence_countries": ["countries where company must NOT have offices / branches / subsidiaries / local entities / presence"],
+  "attributes_wanted": ["website","email","phone","linkedin","summary","hq_country","presence_countries"],
   "output_format": "xlsx" | "csv" | "json" | "pdf",
   "max_results": <number, default 25>,
-  "confidence": <0-100 how confident you are in this parse>
+  "confidence": <0-100>
 }}
 
 RULES:
-- topic = the INDUSTRY or SUBJECT ONLY. Strip out: country names, "email", "phone", "contact", "number", "with", "without", output format words
+- topic = INDUSTRY or SUBJECT ONLY
+- NEVER put country names in topic
+- NEVER put contact/output words in topic
+- entity_category = "software_company" for digital/software/AI/analytics/automation/platform/SaaS vendors
+- solution_keywords must capture the TECHNICAL FOCUS, separate from topic
+- commercial_intent = "agent_or_distributor" when user wants agent, distributor, local representative, representation
+- commercial_intent = "reseller" for reseller intent
+- commercial_intent = "partner" for partner/channel-partner intent
 - For "Find service companies in Egypt working in oil and gas": topic = "oil and gas", include_countries = ["egypt"]
 - For "Find papers about CCS in Europe": topic = "CCS", task_type = "document_research"
-- For "Find digital oil gas companies outside USA and Egypt with email": topic = "oil and gas", entity_category = "software_company", exclude_countries = ["usa", "egypt"]
-- NEVER put country names in the topic field
-- NEVER put attribute words (email, phone, contact) in the topic field
+- For "Find digital oil gas companies outside USA and Egypt with email": topic = "oil and gas", entity_category = "software_company"
+- For "companies that do not have offices in Egypt or the United States": use exclude_presence_countries, NOT include_countries
+- Phrases like "no offices in", "no branches in", "no subsidiaries in", "no local entities in", "exclude Egypt presence", "exclude USA presence", "operate outside" should map to exclude_presence_countries
 - output_format default is "xlsx" unless user says csv/json/pdf
-- attributes_wanted: always include "website". Add "email" if user mentions email/contact. Add "phone" if user mentions phone/number/contact. Add "linkedin" if explicitly mentioned."""
+- attributes_wanted must always include "website"
+- add "email" if user mentions email/contact
+- add "phone" if user mentions phone/number/contact
+- add "linkedin" only if explicitly mentioned
+"""
 
 
 # ---------------------------------------------------------------------------
 # QUERY PLANNING
-# Converts TaskSpec → diverse search queries per provider
-# Used by: core/llm_query_planner.py
 # ---------------------------------------------------------------------------
 
 QUERY_PLAN_PROMPT = """You are a search expert. Generate search queries to find: {topic_description}
@@ -66,42 +63,39 @@ QUERY_PLAN_PROMPT = """You are a search expert. Generate search queries to find:
 Task: {task_type}
 Entity: {entity_category} {entity_type}
 Include countries (search IN these): {include_countries}
-Exclude countries (NOT headquartered there): {exclude_countries}
+Exclude HQ countries: {exclude_countries}
+Exclude presence countries: {exclude_presence_countries}
+Solution keywords: {solution_keywords}
+Commercial intent: {commercial_intent}
 Topic words to use: {topic_words}
 
 Generate search queries. Return ONLY this JSON:
 {{
-  "ddg": [
-    "<query 1>",
-    "<query 2>",
-    "<query 3>"
-  ],
-  "exa": [
-    "<query 1>",
-    "<query 2>"
-  ],
-  "tavily": [
-    "<query 1>"
-  ]
+  "ddg": ["<query 1>", "<query 2>", "<query 3>", "<query 4>"],
+  "exa": ["<query 1>", "<query 2>", "<query 3>"],
+  "tavily": ["<query 1>", "<query 2>"],
+  "serpapi": ["<query 1>", "<query 2>"]
 }}
 
 RULES:
-- DDG: keyword style, 3-6 words, NO negative operators (-"usa") in queries
-- Exa: full natural language sentences describing the ideal result
-- Tavily: questions or phrases
+- DDG: keyword style, 3-8 words, avoid long sentences
+- Exa: full natural-language ideal-result descriptions
+- Tavily: questions or short natural phrases
+- SerpApi: Google-style precise search strings
 - NEVER repeat the same query across providers
-- Each query must take a DIFFERENT angle (industry term, technology, market segment)
-- CRITICAL: If include_countries is "any", do NOT invent or fixate on a specific country.
-  Generate GLOBAL queries like "oil gas software company Europe" or "digital oilfield analytics UK Norway"
-  NOT queries fixated on one country you guessed.
-- If include_countries lists specific countries, use those countries in queries
-- For paper/document searches: always include "site:pubmed" or "site:scholar" or "pdf" variations"""
+- Each provider should take DIFFERENT angles
+- Use solution_keywords explicitly when provided
+- If commercial_intent is agent_or_distributor / reseller / partner, include queries about distributors, resellers, representatives, channel partners, partner programs
+- If include_countries is "any", DO NOT invent one specific country
+- If include_countries lists countries/regions, use them naturally in some queries
+- If exclude_presence_countries exists, bias toward companies operating in Europe / GCC / Canada / Australia / Asia-Pacific and avoid phrasing that centers excluded countries
+- For paper/document searches: include academic/site/pdf variations
+- Prefer real company / vendor queries, not news, rankings, jobs, or directories
+"""
 
 
 # ---------------------------------------------------------------------------
 # RESULT RE-RANKING
-# LLM scores each candidate for relevance to the original request
-# Used by: core/llm_ranker.py
 # ---------------------------------------------------------------------------
 
 RERANK_PROMPT = """You are a precise B2B research analyst. Score these search results for relevance.
@@ -121,21 +115,18 @@ Return ONLY a JSON array — one object per result, same order:
 ]
 
 SCORING RULES:
-- score 8-10: Perfect match. Clearly a {entity_type} in the {topic} sector.
-- score 5-7: Likely relevant but missing some signals.
-- score 2-4: Tangentially related, probably not what user wants.
-- score 0-1: Completely irrelevant (football, real estate, guns, news, directories).
+- score 8-10: perfect match
+- score 5-7: likely relevant but incomplete
+- score 2-4: weak / tangential
+- score 0-1: irrelevant
 - keep=true if score >= 5
-- keep=false if: it is a directory/list page, news article, job board, or completely off-topic
-- If exclude_countries contains "usa" and the company is clearly US-based, score -= 3
-- If exclude_countries contains "egypt" and company is clearly Egypt-based, score -= 3
-- A company MENTIONING an excluded country as a client does NOT count as being based there"""
+- keep=false for directories, rankings, news, blogs, job boards, or irrelevant pages
+- A company mentioning an excluded country as a client does NOT mean it is based there
+"""
 
 
 # ---------------------------------------------------------------------------
 # GEO VERIFICATION
-# Determines HQ country for ambiguous records
-# Used by: core/geo_verifier.py
 # ---------------------------------------------------------------------------
 
 GEO_VERIFY_PROMPT = """You are a corporate intelligence analyst.
@@ -147,25 +138,23 @@ Page text (first 800 chars): {page_text}
 
 Determine where this company is headquartered. Return ONLY this JSON:
 {{
-  "hq_country": "<lowercase country name or empty string if unknown>",
+  "hq_country": "<lowercase country name or empty string>",
   "confidence": <0-100>,
-  "evidence": "<what text led you to this conclusion>",
-  "has_usa_presence": <true/false — office or branch in USA>,
-  "has_egypt_presence": <true/false — office or branch in Egypt>
+  "evidence": "<short evidence>",
+  "has_usa_presence": <true/false>,
+  "has_egypt_presence": <true/false>
 }}
 
 RULES:
-- hq_country = where the COMPANY itself is based, NOT where it serves clients
-- A UK company serving US clients is NOT a US company
-- Mentions of "USA operations" or "Egyptian clients" do NOT mean the company is based there
-- Only set has_usa_presence=true if there is explicit mention of a US office/branch
-- If you cannot determine with confidence >= 40, return empty hq_country"""
+- hq_country = where the COMPANY itself is based
+- serving clients in a country does NOT mean HQ there
+- only set presence flags true if there is explicit office/branch/subsidiary/local-entity evidence
+- if confidence < 40, return empty hq_country
+"""
 
 
 # ---------------------------------------------------------------------------
 # PAGE CLASSIFICATION
-# Determines if a scraped page is a real company in the right sector
-# Used by: providers/local_llm_provider.py
 # ---------------------------------------------------------------------------
 
 PAGE_CLASSIFY_PROMPT = """Classify this web page for B2B research.
@@ -184,19 +173,16 @@ Return ONLY this JSON:
 }}
 
 RULES:
-- page_type="company" ONLY if this is a real company's own website in the {sector} sector
-- page_type="directory" if it lists multiple companies (Top 10, Best companies, etc.)
-- page_type="media" if it is a news article, press release, or magazine
-- page_type="blog" if it is an opinion piece, tutorial, or personal blog
-- page_type="irrelevant" if completely unrelated to {sector}
-- is_relevant=true ONLY for actual companies/vendors in {sector}
-- Do NOT mark directory/list pages as relevant even if they mention {sector}"""
+- page_type="company" ONLY if this is a real company's own website
+- page_type="directory" if it lists multiple companies
+- page_type="media" if it is news / magazine / press release
+- page_type="blog" if opinion / tutorial / personal blog
+- is_relevant=true ONLY for actual companies/vendors in the sector
+"""
 
 
 # ---------------------------------------------------------------------------
 # CONTACT EXTRACTION
-# Extracts structured contact info from unstructured page text
-# Used by: providers/structured_data_extractor.py
 # ---------------------------------------------------------------------------
 
 CONTACT_EXTRACT_PROMPT = """Extract contact information from this company page.
@@ -207,15 +193,16 @@ Page text: {text}
 
 Return ONLY this JSON:
 {{
-  "emails": ["list of email addresses found, empty list if none"],
-  "phones": ["list of phone numbers found, empty list if none"],
-  "linkedin_url": "<LinkedIn company page URL or empty string>",
-  "contact_page_url": "<URL of contact page if found, empty string if not>",
-  "hq_address": "<physical address if found, empty string if not>"
+  "emails": ["list of emails"],
+  "phones": ["list of phone numbers"],
+  "linkedin_url": "<linkedin company page url or empty string>",
+  "contact_page_url": "<contact page url or empty string>",
+  "hq_address": "<physical address or empty string>"
 }}
 
 RULES:
-- Only include REAL emails (not example@domain.com, info@sentry.io, etc.)
-- Phone numbers should include country code if present
-- LinkedIn must be a company page (linkedin.com/company/...) not a personal profile
-- If multiple emails found, list all of them"""
+- include only real-looking emails
+- phone numbers should preserve country code if present
+- linkedin must be company page, not personal profile
+- if multiple emails found, list all
+"""
