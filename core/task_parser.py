@@ -1,22 +1,3 @@
-"""
-task_parser.py
-==============
-Universal regex-first task parser for the research agent.
-
-Main improvements in this version:
-- Preserves the industry/topic separately from company category
-- Correctly classifies prompts like "digital companies in oil and gas"
-  as target_category="software_company" and industry="oil and gas"
-- Treats phrases like "operate outside Egypt and USA" OR
-  "do not have offices/branches/subsidiaries/local entities in ..."
-  as presence exclusion
-- Fixes broad geography leakage where countries from negative phrases
-  were incorrectly added to include_countries
-- Preserves solution keywords like AI / analytics / monitoring /
-  optimization / automation
-- Preserves commercial intent like agent / distributor / reseller / partner
-"""
-
 from __future__ import annotations
 
 import re
@@ -143,12 +124,19 @@ SERVICE_CATEGORY_HINTS = {
     "maintenance", "inspection", "testing", "consulting services",
 }
 
+# IMPORTANT:
+# Exact user-facing labels only.
+# No expansion / inference here.
 SOLUTION_KEYWORD_PATTERNS = {
-    "ai": [
-        r"\bai\b",
-        r"\bartificial intelligence\b",
+    "machine learning": [
         r"\bmachine learning\b",
         r"\bml\b",
+    ],
+    "artificial intelligence": [
+        r"\bartificial intelligence\b",
+    ],
+    "ai": [
+        r"\bai\b",
     ],
     "analytics": [
         r"\banalytics\b",
@@ -555,7 +543,7 @@ def _extract_target_category(prompt_lower: str) -> str:
         r"\bcloud\b",
         r"\biot\b",
         r"\bscada\b",
-        r"\bapp(?:lication)?\b",
+        r"\bapp(?:application)?\b",
         r"\bdata company\b",
         r"\btech company\b",
         r"\btechnology (?:provider|vendor|company|companies)\b",
@@ -678,6 +666,9 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
         "national", "leading", "top", "best", "new", "good", "ai", "data",
         "analytics", "automation", "platform", "platforms", "cloud",
         "monitoring", "optimization", "optimisation",
+        # keep technical solution tokens from polluting the industry
+        "machine", "learning", "artificial", "intelligence", "iot", "scada",
+        "twin", "predictive", "maintenance",
     }
 
     def _clean(raw: str) -> str:
@@ -763,11 +754,15 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
 
 
 def _extract_solution_keywords(prompt_lower: str) -> List[str]:
+    """
+    Exact-only extraction.
+    Keep the actual user-facing phrases instead of collapsing them into broader groups.
+    """
     found: List[str] = []
     for label, patterns in SOLUTION_KEYWORD_PATTERNS.items():
         if any(re.search(pat, prompt_lower) for pat in patterns):
             found.append(label)
-    return found
+    return _dedupe_keep_order(found)
 
 
 def _extract_commercial_intent(prompt_lower: str) -> str:
