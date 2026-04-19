@@ -1,3 +1,19 @@
+"""
+llm_task_parser.py
+==================
+LLM-powered intent parser with regex repair / merge.
+
+Main improvements in this version:
+- Preserves digital/software-company intent even when the LLM collapses the
+  topic to just "oil and gas"
+- Repairs overly broad document topics from the raw prompt
+- Treats phrasing like "operate outside Egypt and USA" as presence exclusion
+- Merges strong regex signals when the LLM output is incomplete or too generic
+- Normalizes geo aliases like UK / UAE / USA
+- Prevents LLM negative geo buckets from overriding regex positive include countries
+- Preserves solution_keywords / domain_keywords if they already exist in TaskSpec
+"""
+
 from __future__ import annotations
 
 import re
@@ -23,10 +39,21 @@ REGION_EXPANSIONS = {
              "malaysia", "indonesia", "thailand", "vietnam", "philippines"],
     "africa": ["south africa", "nigeria", "angola", "kenya", "ghana",
                "ethiopia", "egypt", "morocco", "algeria"],
-    "north america": ["usa", "canada", "mexico"],
+    "north america": ["united states", "canada", "mexico"],
     "south america": ["brazil", "argentina", "chile", "colombia", "peru"],
     "cis": ["russia", "kazakhstan", "azerbaijan", "ukraine"],
     "gcc": ["saudi arabia", "united arab emirates", "qatar", "oman", "kuwait", "bahrain"],
+}
+
+GEO_ALIAS_MAP = {
+    "uk": "united kingdom",
+    "u.k.": "united kingdom",
+    "uae": "united arab emirates",
+    "u.a.e.": "united arab emirates",
+    "usa": "united states",
+    "u.s.a.": "united states",
+    "u.s.": "united states",
+    "us": "united states",
 }
 
 _GENERIC_DOC_TOPICS = {
@@ -85,7 +112,7 @@ _DIGITAL_HINTS = (
 _PRESENCE_PATTERNS = [
     r"\boperate(?:s|d|ing)?\s+outside\b",
     r"\bwork(?:s|ed|ing)?\s+outside\b",
-    r"\bserv(?:e|es|ed|ing)\s+outside\b",
+    r"\bserv(?:e|es|ed|ing)?\s+outside\b",
     r"\bactive\s+outside\b",
     r"\bpresent\s+outside\b",
     r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
@@ -103,56 +130,16 @@ _CATEGORY_NOISE_TERMS = {
     "company", "companies", "vendor", "vendors", "provider", "providers",
 }
 
-_ALLOWED_SOLUTION_KEYWORDS = {
-    "machine learning", "artificial intelligence", "ai", "analytics", "monitoring",
-    "optimization", "automation", "iot", "scada", "digital twin", "predictive maintenance",
-}
-
-_SOLUTION_KEYWORD_PATTERNS = {
-    "machine learning": [r"\bmachine learning\b", r"\bml\b"],
-    "artificial intelligence": [r"\bartificial intelligence\b"],
-    "ai": [r"\bai\b"],
-    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
-    "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
-    "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
-    "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
-    "iot": [r"\biot\b", r"\binternet of things\b"],
-    "scada": [r"\bscada\b"],
-    "digital twin": [r"\bdigital twin\b", r"\bdigital twins\b"],
-    "predictive maintenance": [r"\bpredictive maintenance\b"],
-}
-
-_ALLOWED_DOMAIN_KEYWORDS = {
-    "esp", "virtual flow metering", "well performance", "artificial lift",
-    "production optimization", "well surveillance", "multiphase metering",
-    "flow assurance", "production monitoring", "reservoir simulation",
-    "reservoir modeling", "drilling optimization", "production engineering",
-}
-
-_DOMAIN_KEYWORD_PATTERNS = {
-    "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
-    "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
-    "well performance": [r"\bwell performance\b"],
-    "artificial lift": [r"\bartificial lift\b"],
-    "production optimization": [r"\bproduction optimization\b", r"\bproduction optimisation\b"],
-    "well surveillance": [r"\bwell surveillance\b"],
-    "multiphase metering": [r"\bmultiphase metering\b", r"\bmultiphase meter\b"],
-    "flow assurance": [r"\bflow assurance\b"],
-    "production monitoring": [r"\bproduction monitoring\b"],
-    "reservoir simulation": [r"\breservoir simulation\b"],
-    "reservoir modeling": [r"\breservoir modeling\b", r"\breservoir modelling\b"],
-    "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
-    "production engineering": [r"\bproduction engineering\b"],
-}
-
 
 def parse_with_llm(prompt: str, llm: FreeLLMClient) -> Optional[TaskSpec]:
     if not llm.is_available():
         return None
+
     llm_prompt = INTENT_PARSE_PROMPT.format(prompt=prompt)
     result = llm.generate_json(llm_prompt, timeout=30)
     if not result or not isinstance(result, dict):
         return None
+
     return _dict_to_task_spec(prompt, result)
 
 
@@ -164,28 +151,62 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
     out: list[str] = []
     seen = set()
     for item in items:
-        if not item or item in seen:
+        if not item:
             continue
-        out.append(item)
-        seen.add(item)
+        s = str(item).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _norm_country_value(value: str) -> str:
+    s = str(value or "").strip().lower()
+    if not s:
+        return ""
+    if s in GEO_ALIAS_MAP:
+        return GEO_ALIAS_MAP[s]
+    norm = normalize_country_name(s)
+    return norm or s
+
+
+def _norm_country_list(values: list[str]) -> list[str]:
+    out = []
+    seen = set()
+    for v in values or []:
+        n = _norm_country_value(v)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
     return out
 
 
 def _expand_countries(country_list: list[str]) -> list[str]:
     expanded: list[str] = []
     for item in country_list:
-        item_lower = item.lower().strip()
+        item_lower = str(item).lower().strip()
+        if not item_lower:
+            continue
+
+        if item_lower in GEO_ALIAS_MAP:
+            expanded.append(GEO_ALIAS_MAP[item_lower])
+            continue
+
         if item_lower in REGION_EXPANSIONS:
             expanded.extend(REGION_EXPANSIONS[item_lower])
-        else:
-            region_exp = expand_region_name(item_lower)
-            if region_exp:
-                expanded.extend(region_exp)
-            else:
-                norm = normalize_country_name(item_lower)
-                if norm:
-                    expanded.append(norm)
-    return _dedupe_keep_order(expanded)
+            continue
+
+        region_exp = expand_region_name(item_lower)
+        if region_exp:
+            expanded.extend(region_exp)
+            continue
+
+        norm = normalize_country_name(item_lower)
+        if norm:
+            expanded.append(norm)
+
+    return _norm_country_list(expanded)
 
 
 def _strip_output_noise(text: str) -> str:
@@ -216,6 +237,7 @@ def _is_generic_document_topic(text: str) -> bool:
         return True
     if t in _GENERIC_DOC_TOPICS:
         return True
+
     words = [
         w for w in re.findall(r"[a-z0-9&+/.-]+", t)
         if w not in {"the", "a", "an", "of", "in", "for", "on", "and", "to", "with", "about"}
@@ -232,11 +254,13 @@ def _extract_document_topic_from_prompt(raw_prompt: str) -> str:
         m = re.search(pattern, prompt, flags=re.IGNORECASE)
         if not m:
             continue
+
         candidate = m.group(1)
         candidate = _strip_output_noise(candidate)
         candidate = _strip_broad_domain_tail(candidate)
         candidate = re.sub(r"^(?:the|a|an)\s+", "", candidate, flags=re.IGNORECASE)
         candidate = _norm_spaces(candidate.strip(" .,:;|-"))
+
         if candidate:
             return candidate
 
@@ -271,54 +295,6 @@ def _looks_like_category_polluted_topic(text: str) -> bool:
     return any(term in t for term in _CATEGORY_NOISE_TERMS)
 
 
-def _extract_solution_keywords_from_prompt(prompt_lower: str) -> list[str]:
-    found = []
-    for label, pats in _SOLUTION_KEYWORD_PATTERNS.items():
-        if any(re.search(p, prompt_lower) for p in pats):
-            found.append(label)
-    return _dedupe_keep_order(found)
-
-
-def _sanitize_solution_keywords(values: list[str]) -> list[str]:
-    out = []
-    seen = set()
-    for v in values or []:
-        s = str(v).strip().lower()
-        if s in _ALLOWED_SOLUTION_KEYWORDS and s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
-
-
-def _extract_domain_keywords_from_prompt(prompt_lower: str) -> list[str]:
-    found = []
-    for label, pats in _DOMAIN_KEYWORD_PATTERNS.items():
-        if any(re.search(p, prompt_lower) for p in pats):
-            found.append(label)
-    return _dedupe_keep_order(found)
-
-
-def _sanitize_domain_keywords(values: list[str]) -> list[str]:
-    out = []
-    seen = set()
-    for v in values or []:
-        s = str(v).strip().lower()
-        if s in _ALLOWED_DOMAIN_KEYWORDS and s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
-
-
-def _extract_commercial_intent_from_prompt(prompt_lower: str) -> str:
-    if re.search(r"\b(agent|agency|distributor|distribution|local representation|representative|representation)\b", prompt_lower):
-        return "agent_or_distributor"
-    if re.search(r"\b(reseller|resellers)\b", prompt_lower):
-        return "reseller"
-    if re.search(r"\b(partner|partners|channel partner|channel partners)\b", prompt_lower):
-        return "partner"
-    return "general"
-
-
 def _repair_topic(raw_prompt: str, topic: str, task_type: str, regex_topic: str = "") -> str:
     topic = _norm_spaces(topic)
 
@@ -351,19 +327,29 @@ def _looks_like_presence_exclusion(prompt_lower: str) -> bool:
 
 
 def _clean_geography_with_regex(llm_geo: GeographyRules, regex_geo: GeographyRules) -> GeographyRules:
-    include = list(llm_geo.include_countries or [])
-    exclude = list(llm_geo.exclude_countries or [])
-    exclude_presence = list(llm_geo.exclude_presence_countries or [])
+    """
+    Merge LLM + regex geography, but trust regex positive includes more.
+    If regex explicitly includes a country, do NOT allow the LLM negative lists
+    to override it.
+    """
+    llm_include = _norm_country_list(list(llm_geo.include_countries or []))
+    llm_exclude = _norm_country_list(list(llm_geo.exclude_countries or []))
+    llm_exclude_presence = _norm_country_list(list(llm_geo.exclude_presence_countries or []))
 
-    include.extend(list(regex_geo.include_countries or []))
-    exclude.extend(list(regex_geo.exclude_countries or []))
-    exclude_presence.extend(list(regex_geo.exclude_presence_countries or []))
+    rx_include = _norm_country_list(list(regex_geo.include_countries or []))
+    rx_exclude = _norm_country_list(list(regex_geo.exclude_countries or []))
+    rx_exclude_presence = _norm_country_list(list(regex_geo.exclude_presence_countries or []))
 
-    include = _dedupe_keep_order(include)
-    exclude = _dedupe_keep_order(exclude)
-    exclude_presence = _dedupe_keep_order(exclude_presence)
+    if rx_include:
+        llm_exclude = [c for c in llm_exclude if c not in rx_include]
+        llm_exclude_presence = [c for c in llm_exclude_presence if c not in rx_include]
 
-    include = [c for c in include if c not in exclude and c not in exclude_presence]
+    include = _dedupe_keep_order(llm_include + rx_include)
+    exclude = _dedupe_keep_order(llm_exclude + rx_exclude)
+    exclude_presence = _dedupe_keep_order(llm_exclude_presence + rx_exclude_presence)
+
+    exclude_presence = [c for c in exclude_presence if c not in include]
+    exclude = [c for c in exclude if c not in include]
     exclude = [c for c in exclude if c not in exclude_presence]
 
     return GeographyRules(
@@ -377,8 +363,12 @@ def _clean_geography_with_regex(llm_geo: GeographyRules, regex_geo: GeographyRul
 def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Optional[TaskSpec] = None) -> TaskSpec:
     task_type = data.get("task_type", "entity_discovery")
     if task_type not in {
-        "entity_discovery", "entity_enrichment", "similar_entity_expansion",
-        "market_research", "document_research", "people_search",
+        "entity_discovery",
+        "entity_enrichment",
+        "similar_entity_expansion",
+        "market_research",
+        "document_research",
+        "people_search",
     }:
         task_type = "entity_discovery"
 
@@ -399,6 +389,10 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     exclude_countries = _expand_countries([c for c in exclude_raw if c])
     excpres_countries = _expand_countries([c for c in excpres_raw if c])
 
+    include_set = set(include_countries)
+    exclude_countries = [c for c in exclude_countries if c not in include_set]
+    excpres_countries = [c for c in excpres_countries if c not in include_set]
+
     prompt_lower = _norm_spaces(raw_prompt).lower()
     if task_type in {"entity_discovery", "entity_enrichment", "similar_entity_expansion", "market_research"}:
         if any(hint in prompt_lower for hint in _DIGITAL_HINTS):
@@ -414,6 +408,7 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
         exclude_presence_countries=excpres_countries,
         strict_mode=bool(include_countries or exclude_countries or excpres_countries),
     )
+
     if regex_spec:
         llm_geo = _clean_geography_with_regex(llm_geo, regex_spec.geography)
 
@@ -428,39 +423,16 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     if "website" not in attributes:
         attributes = ["website"] + [a for a in attributes if a != "website"]
 
-    prompt_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
-    llm_solution_keywords = _sanitize_solution_keywords(data.get("solution_keywords", []) or [])
-    if prompt_solution_keywords:
-        solution_keywords = prompt_solution_keywords
-    else:
-        solution_keywords = llm_solution_keywords
-        if not solution_keywords and regex_spec:
-            solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or [])
-
-    prompt_domain_keywords = _extract_domain_keywords_from_prompt(prompt_lower)
-    llm_domain_keywords = _sanitize_domain_keywords(data.get("domain_keywords", []) or [])
-    if prompt_domain_keywords:
-        domain_keywords = prompt_domain_keywords
-    else:
-        domain_keywords = llm_domain_keywords
-        if not domain_keywords and regex_spec:
-            domain_keywords = list(getattr(regex_spec, "domain_keywords", []) or [])
-
-    commercial_intent = str(data.get("commercial_intent", "") or "").strip().lower()
-    if commercial_intent not in {"general", "agent_or_distributor", "reseller", "partner"}:
-        commercial_intent = "general"
-
-    regex_commercial_intent = _extract_commercial_intent_from_prompt(prompt_lower)
-    if commercial_intent == "general" and regex_spec and getattr(regex_spec, "commercial_intent", "general") != "general":
-        commercial_intent = regex_spec.commercial_intent
-    elif commercial_intent == "general" and regex_commercial_intent != "general":
-        commercial_intent = regex_commercial_intent
+    # preserve new fields when present in TaskSpec / prompt_templates
+    solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or []) if regex_spec else []
+    domain_keywords = list(getattr(regex_spec, "domain_keywords", []) or []) if regex_spec else []
+    commercial_intent = getattr(regex_spec, "commercial_intent", "general") if regex_spec else "general"
 
     fmt = data.get("output_format", "xlsx")
     if fmt not in {"xlsx", "csv", "json", "pdf", "ui_table"}:
         fmt = "xlsx"
 
-    max_results = int(data.get("max_results", getattr(regex_spec, "max_results", 25)))
+    max_results = int(data.get("max_results", getattr(regex_spec, "max_results", 25) if regex_spec else 25))
     max_results = max(1, min(max_results, 500))
 
     return TaskSpec(
@@ -474,7 +446,10 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
         commercial_intent=commercial_intent,
         target_attributes=attributes,
         geography=llm_geo,
-        output=OutputSpec(format=fmt, filename=f"results.{fmt if fmt != 'ui_table' else 'xlsx'}"),
+        output=OutputSpec(
+            format=fmt,
+            filename=f"results.{fmt if fmt != 'ui_table' else 'xlsx'}",
+        ),
         credential_mode=CredentialMode(mode="free"),
         use_local_llm=False,
         use_cloud_llm=False,
@@ -484,6 +459,9 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
 
 
 def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec) -> TaskSpec:
+    """
+    Fill gaps in the LLM parse with strong regex signals.
+    """
     if not getattr(llm_spec, "industry", "").strip():
         llm_spec.industry = regex_spec.industry
     elif llm_spec.task_type == "document_research" and _is_generic_document_topic(llm_spec.industry):
@@ -503,21 +481,32 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     if not list(llm_spec.target_attributes or []):
         llm_spec.target_attributes = list(regex_spec.target_attributes or [])
 
-    prompt_lower = _norm_spaces(prompt).lower()
-    prompt_solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
-    if prompt_solution_keywords:
-        llm_spec.solution_keywords = prompt_solution_keywords
-    elif not list(getattr(llm_spec, "solution_keywords", []) or []):
+    # preserve parser-enriched fields from regex path
+    if not list(getattr(llm_spec, "solution_keywords", []) or []):
         llm_spec.solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or [])
-
-    prompt_domain_keywords = _extract_domain_keywords_from_prompt(prompt_lower)
-    if prompt_domain_keywords:
-        llm_spec.domain_keywords = prompt_domain_keywords
-    elif not list(getattr(llm_spec, "domain_keywords", []) or []):
+    if not list(getattr(llm_spec, "domain_keywords", []) or []):
         llm_spec.domain_keywords = list(getattr(regex_spec, "domain_keywords", []) or [])
-
     if getattr(llm_spec, "commercial_intent", "general") == "general":
         llm_spec.commercial_intent = getattr(regex_spec, "commercial_intent", "general")
+
+    rx_inc = _norm_country_list(list(getattr(regex_spec.geography, "include_countries", []) or []))
+    if rx_inc:
+        llm_spec.geography.include_countries = _norm_country_list(
+            list(getattr(llm_spec.geography, "include_countries", []) or []) + rx_inc
+        )
+        llm_spec.geography.exclude_countries = [
+            c for c in _norm_country_list(list(getattr(llm_spec.geography, "exclude_countries", []) or []))
+            if c not in rx_inc
+        ]
+        llm_spec.geography.exclude_presence_countries = [
+            c for c in _norm_country_list(list(getattr(llm_spec.geography, "exclude_presence_countries", []) or []))
+            if c not in rx_inc
+        ]
+        llm_spec.geography.strict_mode = bool(
+            llm_spec.geography.include_countries
+            or llm_spec.geography.exclude_countries
+            or llm_spec.geography.exclude_presence_countries
+        )
 
     if not getattr(llm_spec, "max_results", 0):
         llm_spec.max_results = regex_spec.max_results
@@ -525,16 +514,21 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     return llm_spec
 
 
-def parse_task_prompt_llm_first(prompt: str, llm: Optional[FreeLLMClient] = None) -> TaskSpec:
+def parse_task_prompt_llm_first(
+    prompt: str,
+    llm: Optional[FreeLLMClient] = None,
+) -> TaskSpec:
+    """
+    Main entry point. Tries LLM first, then repairs/merges with the regex parser.
+    If no LLM backend is available, returns the regex parse directly.
+    """
     from core.task_parser import parse_task_prompt as _regex_parse
 
     regex_spec = _regex_parse(prompt)
 
     if llm and llm.is_available():
-        llm_prompt = INTENT_PARSE_PROMPT.format(prompt=prompt)
-        result = llm.generate_json(llm_prompt, timeout=30)
-        if result and isinstance(result, dict):
-            llm_spec = _dict_to_task_spec(prompt, result, regex_spec=regex_spec)
-            return _merge_llm_with_regex(prompt, llm_spec, regex_spec)
+        result = parse_with_llm(prompt, llm)
+        if result:
+            return _merge_llm_with_regex(prompt, result, regex_spec)
 
     return regex_spec
