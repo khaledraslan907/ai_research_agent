@@ -1,9 +1,3 @@
-"""
-prompt_templates.py
-===================
-Single source of truth for every LLM prompt in the agent.
-"""
-
 from __future__ import annotations
 
 
@@ -21,7 +15,7 @@ Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
   "entity_type": "company" | "paper" | "person" | "organization" | "event" | "product",
   "entity_category": "service_company" | "software_company" | "general",
   "topic": "<industry or subject only, e.g. oil and gas, CCS, renewable energy>",
-  "solution_keywords": ["ai","analytics","monitoring","optimization","automation","iot","scada","digital twin","predictive maintenance"],
+  "solution_keywords": ["machine learning","artificial intelligence","ai","analytics","monitoring","optimization","automation","iot","scada","digital twin","predictive maintenance"],
   "commercial_intent": "general" | "agent_or_distributor" | "reseller" | "partner",
   "include_countries": ["countries to search IN, empty if none"],
   "exclude_countries": ["countries to exclude by HQ / headquarters, empty if none"],
@@ -37,15 +31,30 @@ RULES:
 - NEVER put country names in topic
 - NEVER put contact/output words in topic
 - entity_category = "software_company" for digital/software/AI/analytics/automation/platform/SaaS vendors
-- solution_keywords must capture the TECHNICAL FOCUS, separate from topic
+
+CRITICAL RULES FOR solution_keywords:
+- solution_keywords must contain ONLY technical phrases EXPLICITLY WRITTEN in the user's request
+- DO NOT infer related keywords not mentioned by the user
+- DO NOT expand one keyword into a broader taxonomy
+- If the user says "machine learning", return "machine learning"
+- If the user says "AI", return "ai"
+- If the user says "artificial intelligence", return "artificial intelligence"
+- If the user says both "machine learning" and "AI", return both
+- Do NOT add analytics, monitoring, optimization, automation, IoT, SCADA, digital twin, or predictive maintenance unless they are explicitly present in the request
+
+COMMERCIAL INTENT RULES:
 - commercial_intent = "agent_or_distributor" when user wants agent, distributor, local representative, representation
 - commercial_intent = "reseller" for reseller intent
 - commercial_intent = "partner" for partner/channel-partner intent
+
+GEOGRAPHY RULES:
 - For "Find service companies in Egypt working in oil and gas": topic = "oil and gas", include_countries = ["egypt"]
 - For "Find papers about CCS in Europe": topic = "CCS", task_type = "document_research"
 - For "Find digital oil gas companies outside USA and Egypt with email": topic = "oil and gas", entity_category = "software_company"
 - For "companies that do not have offices in Egypt or the United States": use exclude_presence_countries, NOT include_countries
 - Phrases like "no offices in", "no branches in", "no subsidiaries in", "no local entities in", "exclude Egypt presence", "exclude USA presence", "operate outside" should map to exclude_presence_countries
+
+OUTPUT RULES:
 - output_format default is "xlsx" unless user says csv/json/pdf
 - attributes_wanted must always include "website"
 - add "email" if user mentions email/contact
