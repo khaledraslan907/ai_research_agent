@@ -320,7 +320,9 @@ _PRESENCE_OUTSIDE_PATTERNS = [
 ]
 
 _SOLUTION_KEYWORD_PATTERNS = {
-    "ai": [r"\bai\b", r"\bartificial intelligence\b", r"\bmachine learning\b", r"\bml\b"],
+    "machine learning": [r"\bmachine learning\b", r"\bml\b"],
+    "artificial intelligence": [r"\bartificial intelligence\b"],
+    "ai": [r"\bai\b"],
     "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
     "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
     "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
@@ -331,10 +333,34 @@ _SOLUTION_KEYWORD_PATTERNS = {
     "predictive maintenance": [r"\bpredictive maintenance\b"],
 }
 
+_DOMAIN_KEYWORD_PATTERNS = {
+    "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
+    "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
+    "well performance": [r"\bwell performance\b"],
+    "artificial lift": [r"\bartificial lift\b"],
+    "production optimization": [r"\bproduction optimization\b", r"\bproduction optimisation\b"],
+    "well surveillance": [r"\bwell surveillance\b"],
+    "multiphase metering": [r"\bmultiphase metering\b", r"\bmultiphase meter\b"],
+    "flow assurance": [r"\bflow assurance\b"],
+    "production monitoring": [r"\bproduction monitoring\b"],
+    "reservoir simulation": [r"\breservoir simulation\b"],
+    "reservoir modeling": [r"\breservoir modeling\b", r"\breservoir modelling\b"],
+    "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
+    "production engineering": [r"\bproduction engineering\b"],
+}
+
 
 def _extract_solution_keywords_from_prompt(prompt_lower: str) -> list[str]:
     found = []
     for label, patterns in _SOLUTION_KEYWORD_PATTERNS.items():
+        if any(re.search(p, prompt_lower) for p in patterns):
+            found.append(label)
+    return found
+
+
+def _extract_domain_keywords_from_prompt(prompt_lower: str) -> list[str]:
+    found = []
+    for label, patterns in _DOMAIN_KEYWORD_PATTERNS.items():
         if any(re.search(p, prompt_lower) for p in patterns):
             found.append(label)
     return found
@@ -361,6 +387,9 @@ def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
 
     if not list(getattr(task_spec, "solution_keywords", []) or []):
         task_spec.solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
+
+    if not list(getattr(task_spec, "domain_keywords", []) or []):
+        task_spec.domain_keywords = _extract_domain_keywords_from_prompt(prompt_lower)
 
     if getattr(task_spec, "commercial_intent", "general") == "general":
         task_spec.commercial_intent = _extract_commercial_intent_from_prompt(prompt_lower)
@@ -811,6 +840,8 @@ if run_btn and prompt.strip():
 
         if getattr(task_spec, "solution_keywords", None):
             st.info(f"🧩 Solution keywords: {', '.join(task_spec.solution_keywords)}")
+        if getattr(task_spec, "domain_keywords", None):
+            st.info(f"🛢️ Domain keywords: {', '.join(task_spec.domain_keywords)}")
         if getattr(task_spec, "commercial_intent", "general") != "general":
             st.info(f"🤝 Commercial intent: {_humanize_commercial_intent(task_spec.commercial_intent)}")
 
@@ -1151,6 +1182,8 @@ if result and task_meta:
             st.markdown(f"- **Topic / industry:** {task_meta.get('industry', '')}")
             if task_meta.get("solution_keywords"):
                 st.markdown(f"- **Solution keywords:** {', '.join(task_meta['solution_keywords'])}")
+            if task_meta.get("domain_keywords"):
+                st.markdown(f"- **Domain keywords:** {', '.join(task_meta['domain_keywords'])}")
             st.markdown(f"- **Commercial intent:** {_humanize_commercial_intent(task_meta.get('commercial_intent', 'general'))}")
             st.markdown(f"- **Mode:** {task_meta.get('mode', '')}")
             if task_meta.get("include_countries"):
