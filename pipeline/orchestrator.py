@@ -150,6 +150,8 @@ class SearchOrchestrator:
 
         if getattr(task_spec, "solution_keywords", None):
             _log(f"Solution keywords: {', '.join(task_spec.solution_keywords)}")
+        if getattr(task_spec, "domain_keywords", None):
+            _log(f"Domain keywords: {', '.join(task_spec.domain_keywords)}")
         if getattr(task_spec, "commercial_intent", "general") != "general":
             _log(f"Commercial intent: {task_spec.commercial_intent}")
 
@@ -920,6 +922,8 @@ class SearchOrchestrator:
             required = ["website"]
             optional = ["website", "summary"]
 
+        include_terms = list(getattr(task_spec, "solution_keywords", []) or []) + list(getattr(task_spec, "domain_keywords", []) or [])
+
         return SearchSpec(
             raw_prompt=task_spec.raw_prompt,
             entity_type=(task_spec.target_entity_types[0] if task_spec.target_entity_types else "company"),
@@ -927,8 +931,9 @@ class SearchOrchestrator:
             sector=task_spec.industry or "",
             target_category=getattr(task_spec, "target_category", "general") or "general",
             solution_keywords=list(getattr(task_spec, "solution_keywords", []) or []),
+            domain_keywords=list(getattr(task_spec, "domain_keywords", []) or []),
             commercial_intent=getattr(task_spec, "commercial_intent", "general") or "general",
-            include_terms=list(getattr(task_spec, "solution_keywords", []) or []),
+            include_terms=include_terms,
             exclude_terms=[],
             include_countries=list(task_spec.geography.include_countries or []),
             exclude_countries=list(task_spec.geography.exclude_countries or []),
