@@ -3,11 +3,10 @@ app_user.py — AI Research Agent (updated)
 ========================================
 
 Main fixes in this version:
-- Preserves and displays company category clearly (e.g. digital/software companies)
-- Treats prompts like 'operate outside Egypt and USA' as presence exclusion in the app layer
-- Adds an app-side refinement filter to remove obvious non-company results from the final display/export
-- Shows a richer 'what the agent understood' summary
-- Keeps paper summaries and downloads from the original app flow
+- Preserves and displays company category clearly
+- Preserves and displays solution keywords and commercial intent
+- Treats more presence-exclusion phrasing in the app layer
+- Adds richer “what the agent understood” summary
 """
 
 from __future__ import annotations
@@ -293,6 +292,15 @@ def _humanize_target_category(category: str) -> str:
     }.get((category or "").strip(), (category or "general").replace("_", " ").title())
 
 
+def _humanize_commercial_intent(value: str) -> str:
+    return {
+        "general": "General",
+        "agent_or_distributor": "Agent / distributor",
+        "reseller": "Reseller",
+        "partner": "Partner / channel partner",
+    }.get((value or "general").strip(), (value or "general").replace("_", " ").title())
+
+
 _DIGITAL_CATEGORY_HINTS = (
     "digital", "software", "saas", "platform", "analytics", "automation",
     "ai", "artificial intelligence", "machine learning", "data", "iot",
@@ -305,7 +313,41 @@ _PRESENCE_OUTSIDE_PATTERNS = [
     r"\bserv(?:e|es|ed|ing)\s+outside\b",
     r"\bactive\s+outside\b",
     r"\bpresent\s+outside\b",
+    r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence)\s+in\b",
+    r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence)\s+in\b",
+    r"\bexclude\b[^.\n;]{0,80}\bpresence\b",
+    r"\bexcluding\b[^.\n;]{0,80}\bpresence\b",
 ]
+
+_SOLUTION_KEYWORD_PATTERNS = {
+    "ai": [r"\bai\b", r"\bartificial intelligence\b", r"\bmachine learning\b", r"\bml\b"],
+    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
+    "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
+    "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
+    "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
+    "iot": [r"\biot\b", r"\binternet of things\b"],
+    "scada": [r"\bscada\b"],
+    "digital twin": [r"\bdigital twin\b", r"\bdigital twins\b"],
+    "predictive maintenance": [r"\bpredictive maintenance\b"],
+}
+
+
+def _extract_solution_keywords_from_prompt(prompt_lower: str) -> list[str]:
+    found = []
+    for label, patterns in _SOLUTION_KEYWORD_PATTERNS.items():
+        if any(re.search(p, prompt_lower) for p in patterns):
+            found.append(label)
+    return found
+
+
+def _extract_commercial_intent_from_prompt(prompt_lower: str) -> str:
+    if re.search(r"\b(agent|agency|distributor|distribution|local representation|representative|representation)\b", prompt_lower):
+        return "agent_or_distributor"
+    if re.search(r"\b(reseller|resellers)\b", prompt_lower):
+        return "reseller"
+    if re.search(r"\b(partner|partners|channel partner|channel partners)\b", prompt_lower):
+        return "partner"
+    return "general"
 
 
 def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
@@ -317,11 +359,18 @@ def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
         if any(hint in prompt_lower for hint in _DIGITAL_CATEGORY_HINTS):
             task_spec.target_category = "software_company"
 
+    if not list(getattr(task_spec, "solution_keywords", []) or []):
+        task_spec.solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
+
+    if getattr(task_spec, "commercial_intent", "general") == "general":
+        task_spec.commercial_intent = _extract_commercial_intent_from_prompt(prompt_lower)
+
     geo = getattr(task_spec, "geography", None)
     if geo is not None:
         has_presence_outside = any(re.search(pat, prompt_lower) for pat in _PRESENCE_OUTSIDE_PATTERNS)
         if has_presence_outside and getattr(geo, "exclude_countries", None) and not getattr(geo, "exclude_presence_countries", None):
             geo.exclude_presence_countries = sorted(set(list(geo.exclude_countries or [])))
+            geo.exclude_countries = [c for c in (geo.exclude_countries or []) if c not in set(geo.exclude_presence_countries or [])]
 
         geo.strict_mode = bool(
             list(getattr(geo, "include_countries", []) or [])
@@ -760,6 +809,11 @@ if run_btn and prompt.strip():
         c3.info(f"**Industry:** {task_spec.industry}")
         c4.info(f"**Target:** {max_results} results in {mode} mode")
 
+        if getattr(task_spec, "solution_keywords", None):
+            st.info(f"🧩 Solution keywords: {', '.join(task_spec.solution_keywords)}")
+        if getattr(task_spec, "commercial_intent", "general") != "general":
+            st.info(f"🤝 Commercial intent: {_humanize_commercial_intent(task_spec.commercial_intent)}")
+
         if geo.include_countries:
             st.info(f"🌍 Search in: {', '.join(_title_list(geo.include_countries))}")
         if geo.exclude_presence_countries:
@@ -824,6 +878,8 @@ if run_btn and prompt.strip():
         "task_type": task_spec.task_type,
         "industry": task_spec.industry,
         "target_category": getattr(task_spec, "target_category", "general"),
+        "solution_keywords": list(getattr(task_spec, "solution_keywords", []) or []),
+        "commercial_intent": getattr(task_spec, "commercial_intent", "general"),
         "mode": mode,
         "max_results": int(max_results),
         "include_countries": list(task_spec.geography.include_countries or []),
@@ -1003,8 +1059,10 @@ if result and task_meta:
             st.info(f"**{len(summary_candidates)} papers** ready — click to generate summaries.")
             if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
                 status_holder = st.empty()
+
                 def _summary_progress(msg: str):
                     status_holder.caption(f"⏳ {msg}")
+
                 summaries = summarize_papers(
                     papers=summary_candidates,
                     topic=summary_topic,
@@ -1091,6 +1149,9 @@ if result and task_meta:
             st.markdown(f"- **Task type:** {_humanize_task_type(task_meta.get('task_type', ''))}")
             st.markdown(f"- **Category:** {_humanize_target_category(task_meta.get('target_category', 'general'))}")
             st.markdown(f"- **Topic / industry:** {task_meta.get('industry', '')}")
+            if task_meta.get("solution_keywords"):
+                st.markdown(f"- **Solution keywords:** {', '.join(task_meta['solution_keywords'])}")
+            st.markdown(f"- **Commercial intent:** {_humanize_commercial_intent(task_meta.get('commercial_intent', 'general'))}")
             st.markdown(f"- **Mode:** {task_meta.get('mode', '')}")
             if task_meta.get("include_countries"):
                 st.markdown(f"- **Search in:** {', '.join(_title_list(task_meta['include_countries']))}")
