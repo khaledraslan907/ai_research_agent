@@ -19,6 +19,36 @@ _PARTNER_HINTS = [
     "sales partner", "authorized partner", "authorised partner",
 ]
 
+_SOLUTION_SYNONYM_MAP = {
+    "machine learning": ["machine learning", " ml "],
+    "artificial intelligence": ["artificial intelligence"],
+    "ai": [" ai "],
+    "analytics": ["analytics", "analytic"],
+    "monitoring": ["monitoring", "remote monitoring", "surveillance"],
+    "optimization": ["optimization", "optimisation", "optimizer", "optimiser"],
+    "automation": ["automation", "automated", "autonomous"],
+    "iot": ["iot", "internet of things"],
+    "scada": ["scada"],
+    "digital twin": ["digital twin"],
+    "predictive maintenance": ["predictive maintenance"],
+}
+
+_DOMAIN_SYNONYM_MAP = {
+    "esp": [" esp ", "electrical submersible pump", "electric submersible pump"],
+    "virtual flow metering": ["virtual flow metering", "virtual flow meter", "virtual meter"],
+    "well performance": ["well performance"],
+    "artificial lift": ["artificial lift"],
+    "production optimization": ["production optimization", "production optimisation"],
+    "well surveillance": ["well surveillance"],
+    "multiphase metering": ["multiphase metering", "multiphase meter"],
+    "flow assurance": ["flow assurance"],
+    "production monitoring": ["production monitoring"],
+    "reservoir simulation": ["reservoir simulation"],
+    "reservoir modeling": ["reservoir modeling", "reservoir modelling"],
+    "drilling optimization": ["drilling optimization", "drilling optimisation"],
+    "production engineering": ["production engineering"],
+}
+
 
 def _norm_country(value: str | None) -> str:
     raw = (value or "").strip()
@@ -37,14 +67,6 @@ def _norm_country(value: str | None) -> str:
         "uae": "united arab emirates",
     }
     return aliases.get(raw_l, raw_l)
-
-
-def _country_matches(value: str | None, candidates: Iterable[str]) -> bool:
-    norm_v = _norm_country(value)
-    if not norm_v:
-        return False
-    norms = {_norm_country(c) for c in candidates if c}
-    return norm_v in norms
 
 
 def _presence_matches(presence_list: Iterable[str], candidates: Iterable[str]) -> bool:
@@ -68,36 +90,20 @@ def _text_blob(record: CompanyRecord) -> str:
     ]).lower()
 
 
-def _solution_keyword_hit_count(haystack: str, keywords: List[str]) -> int:
+def _keyword_hit_count(haystack: str, keywords: List[str], synonym_map: dict) -> int:
     if not keywords:
         return 0
-
-    synonym_map = {
-        "ai": [" ai ", "artificial intelligence", "machine learning", "ml "],
-        "analytics": ["analytics", "analytic", "insights"],
-        "monitoring": ["monitoring", "remote monitoring", "surveillance"],
-        "optimization": ["optimization", "optimisation", "optimizer", "optimiser"],
-        "automation": ["automation", "automated", "autonomous"],
-        "iot": ["iot", "internet of things"],
-        "scada": ["scada"],
-        "digital twin": ["digital twin", "digital twins"],
-        "predictive maintenance": ["predictive maintenance"],
-    }
-
     hits = 0
     seen = set()
-
     padded = f" {haystack} "
     for kw in keywords:
         key = str(kw).strip().lower()
         if not key or key in seen:
             continue
         seen.add(key)
-
         terms = synonym_map.get(key, [key])
         if any(term in padded or term in haystack for term in terms):
             hits += 1
-
     return hits
 
 
@@ -128,9 +134,9 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
 
     target_category = (getattr(spec, "target_category", "general") or "general").strip().lower()
     solution_keywords = [str(x).strip().lower() for x in (getattr(spec, "solution_keywords", []) or []) if str(x).strip()]
+    domain_keywords = [str(x).strip().lower() for x in (getattr(spec, "domain_keywords", []) or []) if str(x).strip()]
     commercial_intent = (getattr(spec, "commercial_intent", "general") or "general").strip().lower()
 
-    # --- base structure ---
     if record.company_name:
         score += 12
     if record.website:
@@ -141,7 +147,6 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
         desc_len = len(record.description)
         score += 10 if desc_len > 200 else (6 if desc_len > 50 else 3)
 
-    # --- contact completeness (bonus only, not a gate) ---
     if record.email:
         score += 12
     if record.phone:
@@ -151,7 +156,6 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
     if record.linkedin_url:
         score += 5
 
-    # --- page quality ---
     if not record.is_directory_or_media:
         score += 10
     if record.page_type == "company":
@@ -163,7 +167,6 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
 
     haystack = _text_blob(record)
 
-    # --- relevance: sector keyword match ---
     sector_words = [w for w in (getattr(spec, "sector", "") or "").lower().split() if len(w) >= 2]
     sector_hits = sum(1 for w in sector_words if w in haystack)
     if sector_words:
@@ -172,7 +175,6 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
         if sector_hits == 0:
             score -= 35
 
-    # --- target category alignment ---
     if target_category == "software_company":
         software_hits = sum(1 for h in _SOFTWARE_HINTS if h in haystack)
         if software_hits >= 3:
@@ -182,26 +184,20 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
         else:
             score -= 14
 
-    elif target_category == "service_company":
-        service_hits = sum(1 for h in [
-            "services", "service company", "field services", "engineering services",
-            "inspection", "maintenance", "drilling", "completion", "contractor"
-        ] if h in haystack)
-        if service_hits >= 2:
-            score += 8
-        elif service_hits == 0:
-            score -= 8
-
-    # --- solution keyword scoring ---
     if solution_keywords:
-        solution_hits = _solution_keyword_hit_count(haystack, solution_keywords)
+        solution_hits = _keyword_hit_count(haystack, solution_keywords, _SOLUTION_SYNONYM_MAP)
         solution_ratio = solution_hits / max(1, len(set(solution_keywords)))
         score += min(solution_ratio * 16, 16)
-
         if target_category == "software_company" and solution_hits == 0:
             score -= 10
 
-    # include/exclude term scoring
+    if domain_keywords:
+        domain_hits = _keyword_hit_count(haystack, domain_keywords, _DOMAIN_SYNONYM_MAP)
+        domain_ratio = domain_hits / max(1, len(set(domain_keywords)))
+        score += min(domain_ratio * 18, 18)
+        if domain_hits == 0:
+            score -= 8
+
     for t in getattr(spec, "include_terms", []) or []:
         if t.strip().lower() in haystack:
             score += 4
@@ -209,10 +205,8 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
         if t.strip().lower() in haystack:
             score -= 6
 
-    # --- commercial-intent alignment ---
     score += _commercial_intent_bonus(haystack, commercial_intent)
 
-    # --- geography scoring ---
     rec_country = _norm_country(getattr(record, "country", None))
     rec_hq = _norm_country(getattr(record, "hq_country", None))
     presence = [_norm_country(c) for c in (getattr(record, "presence_countries", None) or []) if c]
@@ -235,7 +229,6 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
         elif any(contains_country_or_city(haystack, c) for c in include_countries):
             score += 6
             matched = True
-
         if not matched:
             score -= 2
 
@@ -248,17 +241,14 @@ def score_company_record(record: CompanyRecord, spec: SearchSpec) -> float:
     if exclude_presence:
         if _presence_matches(presence, exclude_presence):
             score -= 24
-
         if "united states" in exclude_presence and getattr(record, "has_usa_presence", False):
             score -= 24
         if "egypt" in exclude_presence and getattr(record, "has_egypt_presence", False):
             score -= 24
-
         for c in exclude_presence:
             if contains_country_or_city(haystack, c):
                 score -= 4
 
-    # requested fields bonus
     for field_name in (getattr(spec, "required_fields", None) or []):
         f = field_name.lower()
         if f == "website" and record.website:
