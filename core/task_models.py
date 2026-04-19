@@ -39,12 +39,19 @@ class TaskSpec:
     raw_prompt: str = ""
     task_type: str = "entity_discovery"
     # entity_discovery | entity_enrichment | similar_entity_expansion
-    # market_research  | document_research
+    # market_research  | document_research | people_search
+
     target_entity_types: List[str] = field(default_factory=lambda: ["company"])
     target_category: str = "general"   # general | service_company | software_company
-    industry: str = ""                 # free-form topic / focus term
+    industry: str = ""                 # domain / vertical, e.g. "oil and gas"
+
+    # New fields
     solution_keywords: List[str] = field(default_factory=list)
-    commercial_intent: str = "general"   # general | agent_or_distributor | reseller | partner
+    # examples: ["ai", "analytics", "monitoring", "optimization", "automation"]
+
+    commercial_intent: str = "general"
+    # general | agent_or_distributor | reseller | partner
+
     target_attributes: List[str] = field(default_factory=lambda: ["website"])
     geography: GeographyRules = field(default_factory=GeographyRules)
     output: OutputSpec = field(default_factory=OutputSpec)
