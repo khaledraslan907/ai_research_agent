@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 
-# ---------------------------------------------------------------------------
-# INTENT PARSING
-# ---------------------------------------------------------------------------
-
 INTENT_PARSE_PROMPT = """You are an AI research agent that understands what users want to find.
 
 User request: "{prompt}"
@@ -16,6 +12,7 @@ Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
   "entity_category": "service_company" | "software_company" | "general",
   "topic": "<industry or subject only, e.g. oil and gas, CCS, renewable energy>",
   "solution_keywords": ["machine learning","artificial intelligence","ai","analytics","monitoring","optimization","automation","iot","scada","digital twin","predictive maintenance"],
+  "domain_keywords": ["esp","virtual flow metering","well performance","artificial lift","production optimization","well surveillance","multiphase metering","flow assurance","production monitoring","reservoir simulation","reservoir modeling","drilling optimization","production engineering"],
   "commercial_intent": "general" | "agent_or_distributor" | "reseller" | "partner",
   "include_countries": ["countries to search IN, empty if none"],
   "exclude_countries": ["countries to exclude by HQ / headquarters, empty if none"],
@@ -42,6 +39,13 @@ CRITICAL RULES FOR solution_keywords:
 - If the user says both "machine learning" and "AI", return both
 - Do NOT add analytics, monitoring, optimization, automation, IoT, SCADA, digital twin, or predictive maintenance unless they are explicitly present in the request
 
+CRITICAL RULES FOR domain_keywords:
+- domain_keywords must capture domain-specific product/use-case phrases explicitly written by the user
+- Keep equipment names and niche oil-and-gas phrases here
+- Examples: ESP, virtual flow metering, well performance, artificial lift
+- Do NOT force these into topic if the broad industry is already clear
+- Do NOT infer domain_keywords that the user did not explicitly mention
+
 COMMERCIAL INTENT RULES:
 - commercial_intent = "agent_or_distributor" when user wants agent, distributor, local representative, representation
 - commercial_intent = "reseller" for reseller intent
@@ -63,10 +67,6 @@ OUTPUT RULES:
 """
 
 
-# ---------------------------------------------------------------------------
-# QUERY PLANNING
-# ---------------------------------------------------------------------------
-
 QUERY_PLAN_PROMPT = """You are a search expert. Generate search queries to find: {topic_description}
 
 Task: {task_type}
@@ -75,6 +75,7 @@ Include countries (search IN these): {include_countries}
 Exclude HQ countries: {exclude_countries}
 Exclude presence countries: {exclude_presence_countries}
 Solution keywords: {solution_keywords}
+Domain keywords: {domain_keywords}
 Commercial intent: {commercial_intent}
 Topic words to use: {topic_words}
 
@@ -94,6 +95,7 @@ RULES:
 - NEVER repeat the same query across providers
 - Each provider should take DIFFERENT angles
 - Use solution_keywords explicitly when provided
+- Use domain_keywords explicitly when provided
 - If commercial_intent is agent_or_distributor / reseller / partner, include queries about distributors, resellers, representatives, channel partners, partner programs
 - If include_countries is "any", DO NOT invent one specific country
 - If include_countries lists countries/regions, use them naturally in some queries
@@ -102,10 +104,6 @@ RULES:
 - Prefer real company / vendor queries, not news, rankings, jobs, or directories
 """
 
-
-# ---------------------------------------------------------------------------
-# RESULT RE-RANKING
-# ---------------------------------------------------------------------------
 
 RERANK_PROMPT = """You are a precise B2B research analyst. Score these search results for relevance.
 
@@ -134,10 +132,6 @@ SCORING RULES:
 """
 
 
-# ---------------------------------------------------------------------------
-# GEO VERIFICATION
-# ---------------------------------------------------------------------------
-
 GEO_VERIFY_PROMPT = """You are a corporate intelligence analyst.
 
 Company: {company_name}
@@ -162,10 +156,6 @@ RULES:
 """
 
 
-# ---------------------------------------------------------------------------
-# PAGE CLASSIFICATION
-# ---------------------------------------------------------------------------
-
 PAGE_CLASSIFY_PROMPT = """Classify this web page for B2B research.
 
 Sector: {sector}
@@ -189,10 +179,6 @@ RULES:
 - is_relevant=true ONLY for actual companies/vendors in the sector
 """
 
-
-# ---------------------------------------------------------------------------
-# CONTACT EXTRACTION
-# ---------------------------------------------------------------------------
 
 CONTACT_EXTRACT_PROMPT = """Extract contact information from this company page.
 
