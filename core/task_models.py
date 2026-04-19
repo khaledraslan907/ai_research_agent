@@ -43,6 +43,8 @@ class TaskSpec:
     target_entity_types: List[str] = field(default_factory=lambda: ["company"])
     target_category: str = "general"   # general | service_company | software_company
     industry: str = ""                 # free-form topic / focus term
+    solution_keywords: List[str] = field(default_factory=list)
+    commercial_intent: str = "general"   # general | agent_or_distributor | reseller | partner
     target_attributes: List[str] = field(default_factory=lambda: ["website"])
     geography: GeographyRules = field(default_factory=GeographyRules)
     output: OutputSpec = field(default_factory=OutputSpec)
