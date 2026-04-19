@@ -3,27 +3,47 @@ plan_builder.py
 ================
 Builds the ExecutionPlan from TaskSpec + ProviderSettings.
 
-Auto-scales mode based on max_results:
-  > 60 results requested  → upgrades Balanced to Deep
-  > 30 results requested  → upgrades Fast to Balanced
-
-People search gets separate query budgets (EXA-heavy, no Tavily).
+Main improvements:
+- Keeps the original mode auto-scaling by max_results
+- Adds budget upgrades for software-company searches with multiple solution keywords
+- Adds budget upgrades for channel / agent / distributor searches
+- Gives these searches Exa/Tavily more room because they are more niche
 """
+
 from __future__ import annotations
 
 from core.task_models import TaskSpec, ExecutionPlan
 
 
+def _n_solution_keywords(task: TaskSpec) -> int:
+    return len([x for x in (getattr(task, "solution_keywords", []) or []) if str(x).strip()])
+
+
+def _is_channel_search(task: TaskSpec) -> bool:
+    return (getattr(task, "commercial_intent", "general") or "general") in {
+        "agent_or_distributor", "reseller", "partner"
+    }
+
+
 def build_execution_plan(task: TaskSpec, provider_settings=None) -> ExecutionPlan:
-    ps   = provider_settings
+    ps = provider_settings
     mode = (task.mode or "Balanced").lower()
     max_r = getattr(task, "max_results", 25) or 25
+    n_keywords = _n_solution_keywords(task)
+    is_channel = _is_channel_search(task)
+    is_software = (getattr(task, "target_category", "general") or "general") == "software_company"
 
     # ── Auto-upgrade mode ──────────────────────────────────────────────────
     if max_r > 60 and mode == "balanced":
         mode = "deep"
     elif max_r > 30 and mode == "fast":
         mode = "balanced"
+
+    # niche / commercial-intent searches need more search breadth
+    if mode == "fast" and (is_channel or (is_software and n_keywords >= 3)):
+        mode = "balanced"
+    if mode == "balanced" and max_r >= 50 and is_channel and n_keywords >= 3:
+        mode = "deep"
 
     # ── Strategy label ─────────────────────────────────────────────────────
     strategy_name = "general_search"
@@ -37,36 +57,43 @@ def build_execution_plan(task: TaskSpec, provider_settings=None) -> ExecutionPla
         strategy_name = "document_research"
     elif task.task_type == "people_search":
         strategy_name = "linkedin_people_search"
+    elif is_software and is_channel:
+        strategy_name = "software_channel_search"
     elif task.target_category == "service_company":
         strategy_name = "service_vendor_search"
     elif task.target_category == "software_company":
         strategy_name = "software_vendor_search"
 
     # ── Provider activation ────────────────────────────────────────────────
-    use_ddg  = ps.use_ddg  if ps else True
-    use_exa  = (ps.use_exa if ps else True) and task.task_type in {
+    use_ddg = ps.use_ddg if ps else True
+    use_exa = (ps.use_exa if ps else True) and task.task_type in {
         "entity_discovery", "similar_entity_expansion",
         "market_research", "document_research", "people_search",
     }
-    use_tavily    = (ps.use_tavily   if ps else False) and mode in {"balanced", "deep"}
-    use_serpapi   = (ps.use_serpapi  if ps else False) and mode == "deep"
+    use_tavily = (ps.use_tavily if ps else False) and mode in {"balanced", "deep"}
+    use_serpapi = (ps.use_serpapi if ps else False) and mode == "deep"
     use_firecrawl = ps.use_firecrawl if ps else False
-    # People search: SerpApi useful in any mode (site:linkedin.com)
+
     if task.task_type == "people_search":
         use_serpapi = (ps.use_serpapi if ps else False)
 
-    use_exa_find_similar       = use_exa and task.task_type == "similar_entity_expansion"
-    use_local_llm_parser       = getattr(task, "use_local_llm", False)
-    use_local_llm_classifier   = use_local_llm_parser and task.task_type in {
+    use_exa_find_similar = use_exa and task.task_type == "similar_entity_expansion"
+    use_local_llm_parser = getattr(task, "use_local_llm", False)
+    use_local_llm_classifier = use_local_llm_parser and task.task_type in {
         "entity_discovery", "entity_enrichment", "market_research",
     }
     use_cloud_llm_batch_verify = (
         getattr(task, "use_cloud_llm", False) and mode in {"balanced", "deep"}
     )
 
+    # channel / niche software searches benefit heavily from semantic providers
+    if is_channel and use_exa:
+        use_exa = True
+    if (is_channel or (is_software and n_keywords >= 2)) and (ps.use_tavily if ps else False):
+        use_tavily = mode in {"balanced", "deep"}
+
     # ── Query counts and candidate caps ────────────────────────────────────
     if task.task_type == "people_search":
-        # EXA-heavy: domain-scoped to linkedin.com/in — no Tavily
         if mode == "fast":
             max_q = {"ddg": 4, "exa": 10, "tavily": 0, "serpapi": 4}
         elif mode == "deep":
@@ -88,10 +115,31 @@ def build_execution_plan(task: TaskSpec, provider_settings=None) -> ExecutionPla
         max_q = {"ddg": 7, "exa": 5, "tavily": 4, "serpapi": 0}
         max_candidates = max(100, max_r * 3)
 
+    # niche boosts
+    if is_software and n_keywords >= 2:
+        max_q["ddg"] += 1
+        max_q["exa"] += 1
+        max_candidates += max(15, n_keywords * 8)
+
+    if is_software and n_keywords >= 4:
+        max_q["exa"] += 1
+        max_q["tavily"] += 1
+        max_candidates += 20
+
+    if is_channel:
+        max_q["ddg"] += 1
+        max_q["exa"] += 2
+        if mode in {"balanced", "deep"}:
+            max_q["tavily"] += 1
+        max_candidates += 25
+
     # Zero out inactive providers
-    if not use_exa:     max_q["exa"]     = 0
-    if not use_tavily:  max_q["tavily"]  = 0
-    if not use_serpapi: max_q["serpapi"] = 0
+    if not use_exa:
+        max_q["exa"] = 0
+    if not use_tavily:
+        max_q["tavily"] = 0
+    if not use_serpapi:
+        max_q["serpapi"] = 0
 
     return ExecutionPlan(
         strategy_name=strategy_name,
