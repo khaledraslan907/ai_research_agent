@@ -1,3 +1,22 @@
+"""
+task_parser.py
+==============
+Universal regex-first task parser for the research agent.
+
+Main improvements in this version:
+- Preserves the industry/topic separately from company category
+- Correctly classifies prompts like "digital companies in oil and gas"
+  as target_category="software_company" and industry="oil and gas"
+- Treats phrases like "operate outside Egypt and USA" OR
+  "do not have offices/branches/subsidiaries/local entities in ..."
+  as presence exclusion
+- Fixes broad geography leakage where countries from negative phrases
+  were incorrectly added to include_countries
+- Preserves solution keywords like AI / analytics / monitoring /
+  optimization / automation
+- Preserves commercial intent like agent / distributor / reseller / partner
+"""
+
 from __future__ import annotations
 
 import re
@@ -89,16 +108,15 @@ GENERIC_STOPWORDS = {
     "when", "how", "what", "who", "each", "every", "per", "this", "these",
     "those", "have", "has", "do", "does", "did", "is", "was", "been", "being",
     "be", "but", "across", "serving", "serve", "serves", "serviced",
-    # people / linkedin noise
     "linkedin", "profiles", "profile", "account", "accounts",
     "engineers", "managers", "manager", "engineer", "specialist",
     "specialists", "director", "directors", "hr", "executives", "executive",
     "professionals", "professional", "employees", "staff", "personnel",
     "team", "teams",
-    # commercial-intent noise
     "agent", "agency", "agencies", "distributor", "distributors",
     "reseller", "resellers", "representative", "representation",
-    "partner", "partners", "channel", "local",
+    "partner", "partners", "channel", "local", "suitable", "prioritize",
+    "prioritise",
 }
 
 _REQUEST_NOISE = {
@@ -125,6 +143,50 @@ SERVICE_CATEGORY_HINTS = {
     "maintenance", "inspection", "testing", "consulting services",
 }
 
+SOLUTION_KEYWORD_PATTERNS = {
+    "ai": [
+        r"\bai\b",
+        r"\bartificial intelligence\b",
+        r"\bmachine learning\b",
+        r"\bml\b",
+    ],
+    "analytics": [
+        r"\banalytics\b",
+        r"\banalytic\b",
+        r"\binsights\b",
+    ],
+    "monitoring": [
+        r"\bmonitoring\b",
+        r"\bremote monitoring\b",
+        r"\bsurveillance\b",
+    ],
+    "optimization": [
+        r"\boptimization\b",
+        r"\boptimisation\b",
+        r"\boptimizer\b",
+        r"\boptimiser\b",
+    ],
+    "automation": [
+        r"\bautomation\b",
+        r"\bautomated\b",
+        r"\bautonomous\b",
+    ],
+    "iot": [
+        r"\biot\b",
+        r"\binternet of things\b",
+    ],
+    "scada": [
+        r"\bscada\b",
+    ],
+    "digital twin": [
+        r"\bdigital twin\b",
+        r"\bdigital twins\b",
+    ],
+    "predictive maintenance": [
+        r"\bpredictive maintenance\b",
+    ],
+}
+
 NEGATIVE_GEO_CUES = [
     "no ", "not ", "without ", "exclude", "excluding", "except",
     "reject", "remove", "outside", "avoid", "other than",
@@ -149,6 +211,7 @@ NEGATIVE_CUE_RE = re.compile(
     r"\b(?:exclude|excluding|reject|remove|avoid|except|other than|not in|not from|outside|without|no|has no|with no|do(?:es)? not have)\b",
     re.IGNORECASE,
 )
+
 PRESENCE_NOUN_RE = re.compile(
     r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities|registered entity|registered entities|distributor|distributors|agent|agents)\b",
     re.IGNORECASE,
@@ -210,6 +273,7 @@ def _find_geo_after_marker(prompt_lower: str, marker_patterns: List[str], mode: 
     """
     Extract countries/regions after marker phrases, while avoiding false positives
     from negative contexts like 'no offices in Egypt'.
+
     mode: include | exclude | exclude_presence | generic
     """
     found: List[str] = []
@@ -225,7 +289,6 @@ def _find_geo_after_marker(prompt_lower: str, marker_patterns: List[str], mode: 
                 left_ctx = prompt_lower[max(0, start - 50):start]
                 whole_ctx = prompt_lower[max(0, start - 80):min(len(prompt_lower), m.end() + 40)]
 
-                # Avoid treating negative contexts as include-geography
                 if mode == "include":
                     if any(cue in left_ctx for cue in NEGATIVE_GEO_CUES):
                         continue
@@ -260,7 +323,7 @@ def _looks_like_presence_exclusion(prompt_lower: str) -> bool:
         r"\bwith\s+no\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
         r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
 
-        r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entities?)\b",
+        r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|operations?|legal entities?)\b",
         r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:egypt|usa|united states)\b[^.\n;]{0,20}\bpresence\b",
     ]
     return any(re.search(pat, prompt_lower) for pat in presence_patterns)
@@ -371,18 +434,13 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
         r"does not have local entities in",
     ]
 
-    # 1) Explicit negative presence extraction
     exclude_presence.extend(_extract_geo_from_negative_presence_phrases(prompt_lower))
-
-    # 2) Explicit generic exclusion extraction
     exclude.extend(_extract_geo_from_negative_phrases(prompt_lower))
 
-    # 3) Marker-based extraction for include / exclude / exclude_presence
     include.extend(_find_geo_after_marker(prompt_lower, include_markers, mode="include"))
     exclude.extend(_find_geo_after_marker(prompt_lower, exclude_markers, mode="exclude"))
     exclude_presence.extend(_find_geo_after_marker(prompt_lower, presence_markers, mode="exclude_presence"))
 
-    # 4) Country-level context fallback
     all_mentioned = find_countries_in_text(prompt_lower)
     for country in all_mentioned:
         for m in re.finditer(r"\b" + re.escape(country) + r"\b", prompt_lower):
@@ -406,7 +464,6 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
     exclude = _dedupe_keep_order(exclude)
     exclude_presence = _dedupe_keep_order(exclude_presence)
 
-    # If the prompt clearly means operational-footprint exclusion, move plain excludes to presence excludes
     if _looks_like_presence_exclusion(prompt_lower) and exclude and not exclude_presence:
         exclude_presence = list(exclude)
         exclude = []
@@ -522,7 +579,6 @@ def _extract_target_category(prompt_lower: str) -> str:
 def _normalize_industry_candidate(text: str) -> str:
     text = _normalize(text)
 
-    # Canonicalize key industry phrases first
     text = re.sub(r"\boil\s*(?:&|and)?\s*gas\b", "oil and gas", text)
     text = re.sub(r"\boil\s+gas\b", "oil and gas", text)
 
@@ -543,7 +599,6 @@ def _normalize_industry_candidate(text: str) -> str:
 
     text = re.sub(r"\s+", " ", text).strip(" ,-")
 
-    # If both oil and gas exist, standardize to one clean label
     if re.search(r"\boil\b", text) and re.search(r"\bgas\b", text):
         return "oil and gas"
 
@@ -631,7 +686,6 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
     def _valid(s: str) -> bool:
         return bool(s) and len(s) > 1 and s not in entity_words
 
-    # Strategy 1: explicit "X industry/sector"
     for pat in [
         r"working\s+in\s+(?:the\s+)?(.+?)\s+(?:industry|sector|space|field)\b",
         r"(?:in|within)\s+(?:the\s+)?(.+?)\s+(?:industry|sector|space|field)\b",
@@ -645,7 +699,6 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
             if _valid(c):
                 return c
 
-    # Strategy 2: papers/articles about X
     for pat in [
         r"(?:papers?|studies|articles?|reports?|publications?|theses?|preprints?|research|literature)\s+(?:about|on|related to|concerning|regarding)\s+(.+)",
     ]:
@@ -655,7 +708,6 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
             if _valid(c):
                 return c
 
-    # Strategy 3: "companies working/operating in X"
     for pat in [
         r"(?:companies|vendors|firms|providers)\s+(?:working|operating|active|specializing)\s+in\s+(.+)",
         r"(?:companies|vendors|firms|providers)\s+(?:in|for|serving)\s+(?:the\s+)?(.+?)\s+(?:sector|industry|space|field|market)\b",
@@ -666,7 +718,6 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
             if _valid(c):
                 return c
 
-    # Strategy 4: "find [topic] companies" but avoid category-only qualifiers
     entity_pattern = r"(?:companies|vendors|providers|firms|contractors?|operators?|suppliers?|startups?)"
     m = re.search(
         r"(?:find|search for|get|show|list|discover|look for)\s+"
@@ -684,7 +735,6 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
         if is_meaningful:
             return c
 
-    # Strategy 5: about X / related to X
     for pat in [r"about\s+(.+)", r"related\s+to\s+(.+)", r"on\s+(?:the\s+)?(.+)"]:
         m = re.search(pat, prompt_lower)
         if m:
@@ -692,7 +742,6 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
             if _valid(c) and len(c.split()) >= 2:
                 return c
 
-    # Fallback: strip noise
     tokens = re.split(r"[\s,/]+", prompt_lower)
     filtered = [
         t for t in tokens
@@ -711,6 +760,24 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
         return "research"
 
     return candidate or ""
+
+
+def _extract_solution_keywords(prompt_lower: str) -> List[str]:
+    found: List[str] = []
+    for label, patterns in SOLUTION_KEYWORD_PATTERNS.items():
+        if any(re.search(pat, prompt_lower) for pat in patterns):
+            found.append(label)
+    return found
+
+
+def _extract_commercial_intent(prompt_lower: str) -> str:
+    if re.search(r"\b(agent|agency|distributor|distribution|local representation|representative|representation)\b", prompt_lower):
+        return "agent_or_distributor"
+    if re.search(r"\b(reseller|resellers)\b", prompt_lower):
+        return "reseller"
+    if re.search(r"\b(partner|partners|channel partner|channel partners)\b", prompt_lower):
+        return "partner"
+    return "general"
 
 
 def _extract_target_attributes(prompt_lower: str, task_type: str) -> List[str]:
@@ -759,6 +826,8 @@ def parse_task_prompt(prompt: str) -> TaskSpec:
     geography = _extract_geography(prompt_lower)
     output_format = _extract_output_format(prompt_lower)
     focus_term = _extract_focus_term(prompt, prompt_lower, task_type)
+    solution_keywords = _extract_solution_keywords(prompt_lower)
+    commercial_intent = _extract_commercial_intent(prompt_lower)
     target_attributes = _extract_target_attributes(prompt_lower, task_type)
     max_results = _extract_max_results(prompt)
 
@@ -771,6 +840,8 @@ def parse_task_prompt(prompt: str) -> TaskSpec:
         target_entity_types=entity_types,
         target_category=target_category,
         industry=focus_term,
+        solution_keywords=solution_keywords,
+        commercial_intent=commercial_intent,
         target_attributes=target_attributes,
         geography=geography,
         output=OutputSpec(format=output_format, filename=filename),
