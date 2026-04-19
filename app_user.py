@@ -4,9 +4,10 @@ app_user.py — AI Research Agent (updated)
 
 Main fixes in this version:
 - Preserves and displays company category clearly
-- Preserves and displays solution keywords and commercial intent
-- Treats more presence-exclusion phrasing in the app layer
-- Adds richer “what the agent understood” summary
+- Preserves and displays solution keywords, domain keywords, and commercial intent
+- Fixes prompt parsing call (uses prompt instead of undefined user_prompt)
+- Saves domain keywords into task_meta so they appear in Search Details
+- Keeps app-layer postprocessing minimal and aligned with backend parser
 """
 
 from __future__ import annotations
@@ -241,6 +242,32 @@ def _clean_text(value) -> str:
 
 def _normalize_prompt_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _dedupe_repeated_prompt(prompt: str) -> str:
+    raw = (prompt or "").strip()
+    if not raw:
+        return raw
+
+    half = len(raw) // 2
+    left = raw[:half].strip()
+    right = raw[half:].strip()
+
+    if left and right and left == right:
+        return left
+
+    if len(raw) > 40:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+        deduped = []
+        prev = None
+        for s in sentences:
+            if prev is not None and s == prev:
+                continue
+            deduped.append(s)
+            prev = s
+        return " ".join(deduped)
+
+    return raw
 
 
 def _first_nonempty(record: dict, keys: list[str]) -> str:
@@ -782,11 +809,12 @@ if run_btn and prompt.strip():
     st.session_state["summaries_topic"] = ""
     st.session_state["active_section"] = "results"
 
-    with st.spinner("🧠 Understanding your request..."):
-        clean_prompt = _dedupe_repeated_prompt(user_prompt)
-        task_spec = parse_task_prompt_llm_first(clean_prompt, llm=llm_client) if llm_client else parse_task_prompt(clean_prompt)
+    clean_prompt = _dedupe_repeated_prompt(prompt)
 
-    task_spec = _postprocess_task_spec_from_prompt(task_spec, prompt)
+    with st.spinner("🧠 Understanding your request..."):
+        task_spec = parse_task_prompt_llm_first(clean_prompt, llm=llm_client)
+
+    task_spec = _postprocess_task_spec_from_prompt(task_spec, clean_prompt)
     task_spec.mode = mode
     task_spec.max_results = int(max_results)
 
@@ -911,6 +939,7 @@ if run_btn and prompt.strip():
         "industry": task_spec.industry,
         "target_category": getattr(task_spec, "target_category", "general"),
         "solution_keywords": list(getattr(task_spec, "solution_keywords", []) or []),
+        "domain_keywords": list(getattr(task_spec, "domain_keywords", []) or []),
         "commercial_intent": getattr(task_spec, "commercial_intent", "general"),
         "mode": mode,
         "max_results": int(max_results),
