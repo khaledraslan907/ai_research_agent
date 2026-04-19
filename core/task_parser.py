@@ -15,10 +15,6 @@ from core.geography import (
     REGION_ALIASES,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entity / attribute / format hints
-# ─────────────────────────────────────────────────────────────────────────────
-
 ENTITY_HINTS = {
     "company": [
         "company", "companies", "vendor", "vendors", "firm", "firms",
@@ -51,24 +47,25 @@ ENTITY_HINTS = {
 }
 
 ATTRIBUTE_HINTS = {
-    "website":            ["website", "site", "url", "homepage", "link", "web"],
-    "email":              ["email", "emails", "mail", "contact email", "e-mail"],
-    "phone":              ["phone", "telephone", "tel", "mobile", "contact number",
-                           "phone number", "contact details", "contact info",
-                           "contact information", "contact"],
-    "linkedin":           ["linkedin"],
-    "hq_country":         ["hq", "headquarters", "head office", "based in", "headquartered"],
+    "website": ["website", "site", "url", "homepage", "link", "web"],
+    "email": ["email", "emails", "mail", "contact email", "e-mail"],
+    "phone": [
+        "phone", "telephone", "tel", "mobile", "contact number",
+        "phone number", "contact details", "contact info",
+        "contact information", "contact",
+    ],
+    "linkedin": ["linkedin"],
+    "hq_country": ["hq", "headquarters", "head office", "based in", "headquartered"],
     "presence_countries": ["branches", "offices", "presence", "locations", "regional"],
-    "summary":            ["summary", "overview", "description", "abstract", "bio"],
-    "author":             ["author", "authors", "written by", "authored by",
-                           "who wrote", "researcher", "researchers"],
-    "pdf":                ["pdf", "full text", "download"],
+    "summary": ["summary", "overview", "description", "abstract", "bio"],
+    "author": ["author", "authors", "written by", "authored by", "who wrote", "researcher", "researchers"],
+    "pdf": ["pdf", "full text", "download"],
 }
 
 FORMAT_HINTS = {
     "xlsx": ["excel", "xlsx", "spreadsheet", "xls"],
-    "csv":  ["csv"],
-    "pdf":  [
+    "csv": ["csv"],
+    "pdf": [
         "pdf report", "as pdf", "in pdf", "pdf file", "export pdf",
         "as a pdf", "pdf format", "pdf output", "pdf document", "export as pdf",
         "save as pdf", "output pdf", "export to pdf", "to pdf",
@@ -124,55 +121,36 @@ SERVICE_CATEGORY_HINTS = {
     "maintenance", "inspection", "testing", "consulting services",
 }
 
-# IMPORTANT:
-# Exact user-facing labels only.
-# No expansion / inference here.
+# exact broad technical families only
 SOLUTION_KEYWORD_PATTERNS = {
-    "machine learning": [
-        r"\bmachine learning\b",
-        r"\bml\b",
-    ],
-    "artificial intelligence": [
-        r"\bartificial intelligence\b",
-    ],
-    "ai": [
-        r"\bai\b",
-    ],
-    "analytics": [
-        r"\banalytics\b",
-        r"\banalytic\b",
-        r"\binsights\b",
-    ],
-    "monitoring": [
-        r"\bmonitoring\b",
-        r"\bremote monitoring\b",
-        r"\bsurveillance\b",
-    ],
-    "optimization": [
-        r"\boptimization\b",
-        r"\boptimisation\b",
-        r"\boptimizer\b",
-        r"\boptimiser\b",
-    ],
-    "automation": [
-        r"\bautomation\b",
-        r"\bautomated\b",
-        r"\bautonomous\b",
-    ],
-    "iot": [
-        r"\biot\b",
-        r"\binternet of things\b",
-    ],
-    "scada": [
-        r"\bscada\b",
-    ],
-    "digital twin": [
-        r"\bdigital twin\b",
-        r"\bdigital twins\b",
-    ],
-    "predictive maintenance": [
-        r"\bpredictive maintenance\b",
-    ],
+    "machine learning": [r"\bmachine learning\b", r"\bml\b"],
+    "artificial intelligence": [r"\bartificial intelligence\b"],
+    "ai": [r"\bai\b"],
+    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
+    "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
+    "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
+    "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
+    "iot": [r"\biot\b", r"\binternet of things\b"],
+    "scada": [r"\bscada\b"],
+    "digital twin": [r"\bdigital twin\b", r"\bdigital twins\b"],
+    "predictive maintenance": [r"\bpredictive maintenance\b"],
+}
+
+# exact domain/use-case phrases
+DOMAIN_KEYWORD_PATTERNS = {
+    "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
+    "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
+    "well performance": [r"\bwell performance\b"],
+    "artificial lift": [r"\bartificial lift\b"],
+    "production optimization": [r"\bproduction optimization\b", r"\bproduction optimisation\b"],
+    "well surveillance": [r"\bwell surveillance\b"],
+    "multiphase metering": [r"\bmultiphase metering\b", r"\bmultiphase meter\b"],
+    "flow assurance": [r"\bflow assurance\b"],
+    "production monitoring": [r"\bproduction monitoring\b"],
+    "reservoir simulation": [r"\breservoir simulation\b"],
+    "reservoir modeling": [r"\breservoir modeling\b", r"\breservoir modelling\b"],
+    "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
+    "production engineering": [r"\bproduction engineering\b"],
 }
 
 NEGATIVE_GEO_CUES = [
@@ -182,17 +160,10 @@ NEGATIVE_GEO_CUES = [
 ]
 
 PRESENCE_ENTITY_WORDS = [
-    "office", "offices",
-    "branch", "branches",
-    "subsidiary", "subsidiaries",
-    "local entity", "local entities",
-    "entity", "entities",
-    "presence",
-    "legal entity", "legal entities",
-    "registered entity", "registered entities",
-    "operations", "operation",
-    "distributor", "distributors",
-    "agent", "agents",
+    "office", "offices", "branch", "branches", "subsidiary", "subsidiaries",
+    "local entity", "local entities", "entity", "entities", "presence",
+    "legal entity", "legal entities", "registered entity", "registered entities",
+    "operations", "operation", "distributor", "distributors", "agent", "agents",
 ]
 
 NEGATIVE_CUE_RE = re.compile(
@@ -204,10 +175,6 @@ PRESENCE_NOUN_RE = re.compile(
     r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities|registered entity|registered entities|distributor|distributors|agent|agents)\b",
     re.IGNORECASE,
 )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Geo helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 _ALL_SUBNATIONAL = {}
 _ALL_SUBNATIONAL.update(US_STATES)
@@ -258,12 +225,6 @@ def _find_geo_tokens_in_text(text: str) -> List[str]:
 
 
 def _find_geo_after_marker(prompt_lower: str, marker_patterns: List[str], mode: str = "generic") -> List[str]:
-    """
-    Extract countries/regions after marker phrases, while avoiding false positives
-    from negative contexts like 'no offices in Egypt'.
-
-    mode: include | exclude | exclude_presence | generic
-    """
     found: List[str] = []
     all_geo_tokens = sorted(all_country_names() + list(_ALL_REGIONS), key=len, reverse=True)
 
@@ -304,13 +265,11 @@ def _looks_like_presence_exclusion(prompt_lower: str) -> bool:
         r"\bserv(?:e|es|ed|ing)\s+outside\b",
         r"\bactive\s+outside\b",
         r"\bpresent\s+outside\b",
-
         r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
         r"\bwithout\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
         r"\bhas\s+no\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
         r"\bwith\s+no\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
         r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
-
         r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|operations?|legal entities?)\b",
         r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:egypt|usa|united states)\b[^.\n;]{0,20}\bpresence\b",
     ]
@@ -332,7 +291,6 @@ def _extract_geo_from_negative_presence_phrases(prompt_lower: str) -> List[str]:
                 for token in _find_geo_tokens_in_text(span):
                     found.extend(_expand_geo_name(token))
                 continue
-
             if PRESENCE_NOUN_RE.search(span):
                 for token in _find_geo_tokens_in_text(span):
                     found.extend(_expand_geo_name(token))
@@ -361,65 +319,31 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
     exclude_presence: List[str] = []
 
     include_markers = [
-        r"search in",
-        r"search only in",
-        r"search within",
-        r"look in",
-        r"companies in",
-        r"vendors in",
-        r"firms in",
-        r"providers in",
-        r"software companies in",
-        r"technology companies in",
-        r"headquartered in",
-        r"based in",
-        r"located in",
-        r"from",
-        r"within",
-        r"inside",
-        r"in the following regions",
-        r"in the following countries",
-        r"in the following regions only",
-        r"in the following countries only",
+        r"search in", r"search only in", r"search within", r"look in",
+        r"companies in", r"vendors in", r"firms in", r"providers in",
+        r"software companies in", r"technology companies in", r"headquartered in",
+        r"based in", r"located in", r"from", r"within", r"inside",
+        r"in the following regions", r"in the following countries",
+        r"in the following regions only", r"in the following countries only",
     ]
 
     exclude_markers = [
-        r"outside",
-        r"excluding",
-        r"exclude",
-        r"except",
-        r"not in",
-        r"not from",
-        r"other than",
-        r"beyond",
-        r"avoid",
-        r"reject",
-        r"remove",
+        r"outside", r"excluding", r"exclude", r"except", r"not in",
+        r"not from", r"other than", r"beyond", r"avoid", r"reject", r"remove",
     ]
 
     presence_markers = [
-        r"operate(?:s|d|ing)? outside",
-        r"operating outside",
-        r"work(?:s|ed|ing)? outside",
-        r"working outside",
-        r"serv(?:e|es|ed|ing)? outside",
-        r"serving outside",
-        r"active outside",
-        r"present outside",
-        r"no branches in",
-        r"without branches in",
-        r"no offices in",
-        r"without offices in",
-        r"no presence in",
-        r"without presence in",
-        r"do not have offices in",
-        r"does not have offices in",
-        r"do not have branches in",
-        r"does not have branches in",
-        r"do not have subsidiaries in",
-        r"does not have subsidiaries in",
-        r"do not have local entities in",
-        r"does not have local entities in",
+        r"operate(?:s|d|ing)? outside", r"operating outside",
+        r"work(?:s|ed|ing)? outside", r"working outside",
+        r"serv(?:e|es|ed|ing)? outside", r"serving outside",
+        r"active outside", r"present outside",
+        r"no branches in", r"without branches in",
+        r"no offices in", r"without offices in",
+        r"no presence in", r"without presence in",
+        r"do not have offices in", r"does not have offices in",
+        r"do not have branches in", r"does not have branches in",
+        r"do not have subsidiaries in", r"does not have subsidiaries in",
+        r"do not have local entities in", r"does not have local entities in",
     ]
 
     exclude_presence.extend(_extract_geo_from_negative_presence_phrases(prompt_lower))
@@ -459,18 +383,13 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
     include = [c for c in include if c not in exclude and c not in exclude_presence]
     exclude = [c for c in exclude if c not in exclude_presence]
 
-    strict_mode = bool(include or exclude or exclude_presence)
-
     return GeographyRules(
         include_countries=include,
         exclude_countries=exclude,
         exclude_presence_countries=exclude_presence,
-        strict_mode=strict_mode,
+        strict_mode=bool(include or exclude or exclude_presence),
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task / entity / output extraction
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_entity_types(prompt_lower: str) -> List[str]:
     found = []
@@ -479,9 +398,7 @@ def _extract_entity_types(prompt_lower: str) -> List[str]:
             found.append(entity_type)
 
     if "paper" in found and "person" in found:
-        explicit_person = any(w in prompt_lower for w in [
-            "people", "researcher", "expert", "consultant", "ceo", "founder", "director",
-        ])
+        explicit_person = any(w in prompt_lower for w in ["people", "researcher", "expert", "consultant", "ceo", "founder", "director"])
         if not explicit_person:
             found.remove("person")
 
@@ -534,39 +451,21 @@ def _extract_target_category(prompt_lower: str) -> str:
         return "service_company"
 
     digital_patterns = [
-        r"\bdigital\b",
-        r"\bsoftware\b",
-        r"\bsaas\b",
-        r"\bplatform(?:s)?\b",
-        r"\banalytics\b",
-        r"\bautomation\b",
-        r"\bcloud\b",
-        r"\biot\b",
-        r"\bscada\b",
-        r"\bapp(?:application)?\b",
-        r"\bdata company\b",
-        r"\btech company\b",
-        r"\btechnology (?:provider|vendor|company|companies)\b",
-        r"\bai company\b",
-        r"\bai companies\b",
-        r"\bmachine learning\b",
-        r"\bartificial intelligence\b",
-        r"\bmonitoring\b",
-        r"\boptimization\b",
-        r"\boptimisation\b",
+        r"\bdigital\b", r"\bsoftware\b", r"\bsaas\b", r"\bplatform(?:s)?\b",
+        r"\banalytics\b", r"\bautomation\b", r"\bcloud\b", r"\biot\b", r"\bscada\b",
+        r"\bapp(?:lication)?\b", r"\bdata company\b", r"\btech company\b",
+        r"\btechnology (?:provider|vendor|company|companies)\b", r"\bai company\b",
+        r"\bai companies\b", r"\bmachine learning\b", r"\bartificial intelligence\b",
+        r"\bmonitoring\b", r"\boptimization\b", r"\boptimisation\b",
     ]
     if any(re.search(pat, prompt_lower) for pat in digital_patterns):
         return "software_company"
 
     return "general"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Topic extraction
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _normalize_industry_candidate(text: str) -> str:
     text = _normalize(text)
-
     text = re.sub(r"\boil\s*(?:&|and)?\s*gas\b", "oil and gas", text)
     text = re.sub(r"\boil\s+gas\b", "oil and gas", text)
 
@@ -574,9 +473,8 @@ def _normalize_industry_candidate(text: str) -> str:
         set(DIGITAL_CATEGORY_HINTS) | set(SERVICE_CATEGORY_HINTS) | {
             "company", "companies", "vendor", "vendors", "provider", "providers",
             "firm", "firms", "startup", "startups", "supplier", "suppliers",
-            "technology company", "technology companies",
-            "software company", "software companies",
-            "digital company", "digital companies",
+            "technology company", "technology companies", "software company",
+            "software companies", "digital company", "digital companies",
         },
         key=len,
         reverse=True,
@@ -586,10 +484,8 @@ def _normalize_industry_candidate(text: str) -> str:
         text = re.sub(r"\b" + re.escape(phrase) + r"\b", " ", text)
 
     text = re.sub(r"\s+", " ", text).strip(" ,-")
-
     if re.search(r"\boil\b", text) and re.search(r"\bgas\b", text):
         return "oil and gas"
-
     return text
 
 
@@ -627,9 +523,9 @@ def _clean_topic_text(text: str) -> str:
         "linkedin", "website", "websites", "url", "tel", "mobile", "address",
         "operating", "operates", "headquartered", "link", "links", "title",
         "titles", "author", "authors", "doi", "journal", "year", "date",
-        "abstract", "citation", "paper", "papers", "research", "study",
-        "studies", "pdf", "csv", "excel", "xlsx", "xls", "json", "file",
-        "files", "export", "download", "output", "format", "report", "document",
+        "abstract", "citation", "paper", "papers", "research", "study", "studies",
+        "pdf", "csv", "excel", "xlsx", "xls", "json", "file", "files", "export",
+        "download", "output", "format", "report", "document",
     }
 
     words = [w for w in re.split(r"[\s,/]+", text) if w]
@@ -641,10 +537,7 @@ def _clean_topic_text(text: str) -> str:
         and w not in state_words
     ]
 
-    cleaned = " ".join(words).strip()
-    cleaned = _normalize_industry_candidate(cleaned)
-
-    return cleaned
+    return _normalize_industry_candidate(" ".join(words).strip())
 
 
 def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
@@ -666,9 +559,10 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
         "national", "leading", "top", "best", "new", "good", "ai", "data",
         "analytics", "automation", "platform", "platforms", "cloud",
         "monitoring", "optimization", "optimisation",
-        # keep technical solution tokens from polluting the industry
         "machine", "learning", "artificial", "intelligence", "iot", "scada",
-        "twin", "predictive", "maintenance",
+        "esp", "virtual", "flow", "metering", "well", "performance",
+        "artificial", "lift", "production", "surveillance", "multiphase",
+        "assurance", "simulation", "modeling", "modelling", "drilling",
     }
 
     def _clean(raw: str) -> str:
@@ -749,17 +643,20 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
 
     if task_type == "document_research" and not candidate:
         return "research"
-
     return candidate or ""
 
 
 def _extract_solution_keywords(prompt_lower: str) -> List[str]:
-    """
-    Exact-only extraction.
-    Keep the actual user-facing phrases instead of collapsing them into broader groups.
-    """
     found: List[str] = []
     for label, patterns in SOLUTION_KEYWORD_PATTERNS.items():
+        if any(re.search(pat, prompt_lower) for pat in patterns):
+            found.append(label)
+    return _dedupe_keep_order(found)
+
+
+def _extract_domain_keywords(prompt_lower: str) -> List[str]:
+    found: List[str] = []
+    for label, patterns in DOMAIN_KEYWORD_PATTERNS.items():
         if any(re.search(pat, prompt_lower) for pat in patterns):
             found.append(label)
     return _dedupe_keep_order(found)
@@ -807,9 +704,6 @@ def _extract_max_results(prompt: str) -> int:
             return v
     return 25
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────────────────────────────
 
 def parse_task_prompt(prompt: str) -> TaskSpec:
     prompt = (prompt or "").strip()
@@ -822,6 +716,7 @@ def parse_task_prompt(prompt: str) -> TaskSpec:
     output_format = _extract_output_format(prompt_lower)
     focus_term = _extract_focus_term(prompt, prompt_lower, task_type)
     solution_keywords = _extract_solution_keywords(prompt_lower)
+    domain_keywords = _extract_domain_keywords(prompt_lower)
     commercial_intent = _extract_commercial_intent(prompt_lower)
     target_attributes = _extract_target_attributes(prompt_lower, task_type)
     max_results = _extract_max_results(prompt)
@@ -836,6 +731,7 @@ def parse_task_prompt(prompt: str) -> TaskSpec:
         target_category=target_category,
         industry=focus_term,
         solution_keywords=solution_keywords,
+        domain_keywords=domain_keywords,
         commercial_intent=commercial_intent,
         target_attributes=target_attributes,
         geography=geography,
