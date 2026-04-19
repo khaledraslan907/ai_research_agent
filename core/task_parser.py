@@ -157,7 +157,6 @@ DOMAIN_KEYWORD_PATTERNS = {
     "production engineering": [r"\bproduction engineering\b"],
 }
 
-# critical short aliases
 GEO_ALIAS_MAP = {
     "uk": "united kingdom",
     "u.k.": "united kingdom",
@@ -169,26 +168,6 @@ GEO_ALIAS_MAP = {
     "us": "united states",
 }
 
-NEGATIVE_GEO_CUES = [
-    "no ", "not ", "without ", "exclude", "excluding", "except",
-    "reject", "remove", "outside", "avoid", "other than",
-    "do not have", "does not have", "has no", "with no",
-]
-
-PRESENCE_ENTITY_WORDS = [
-    "office", "offices",
-    "branch", "branches",
-    "subsidiary", "subsidiaries",
-    "local entity", "local entities",
-    "entity", "entities",
-    "presence",
-    "legal entity", "legal entities",
-    "registered entity", "registered entities",
-    "operations", "operation",
-    "distributor", "distributors",
-    "agent", "agents",
-]
-
 NEGATIVE_CUE_RE = re.compile(
     r"\b(?:exclude|excluding|reject|remove|avoid|except|other than|not in|not from|outside|without|no|has no|with no|do(?:es)? not have)\b",
     re.IGNORECASE,
@@ -196,6 +175,11 @@ NEGATIVE_CUE_RE = re.compile(
 
 PRESENCE_NOUN_RE = re.compile(
     r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities|registered entity|registered entities|distributor|distributors|agent|agents)\b",
+    re.IGNORECASE,
+)
+
+OUTSIDE_ACTIVITY_RE = re.compile(
+    r"\b(?:operate(?:s|d|ing)?|work(?:s|ed|ing)?|serv(?:e|es|ed|ing)?|active|present)\s+outside\b",
     re.IGNORECASE,
 )
 
@@ -214,18 +198,17 @@ def _dedupe_keep_order(items: List[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     for item in items:
-        if not item or item in seen:
+        if not item:
             continue
-        out.append(item)
-        seen.add(item)
+        s = str(item).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
     return out
 
 
 def _dedupe_repeated_prompt(prompt: str) -> str:
-    """
-    If the exact same prompt is accidentally pasted twice back-to-back,
-    keep only one copy.
-    """
     raw = (prompt or "").strip()
     if not raw:
         return raw
@@ -233,7 +216,6 @@ def _dedupe_repeated_prompt(prompt: str) -> str:
     half = len(raw) // 2
     left = raw[:half].strip()
     right = raw[half:].strip()
-
     if left and right and left == right:
         return left
 
@@ -249,6 +231,13 @@ def _dedupe_repeated_prompt(prompt: str) -> str:
         return " ".join(deduped)
 
     return raw
+
+
+def _normalize_geo_aliases_in_text(text: str) -> str:
+    out = text
+    for alias, canonical in sorted(GEO_ALIAS_MAP.items(), key=lambda x: len(x[0]), reverse=True):
+        out = re.sub(r"\b" + re.escape(alias) + r"\b", canonical, out, flags=re.IGNORECASE)
+    return out
 
 
 def _expand_geo_name(name: str) -> List[str]:
@@ -271,13 +260,13 @@ def _expand_geo_name(name: str) -> List[str]:
 
 
 def _find_geo_tokens_in_text(text: str) -> List[str]:
-    text = _normalize(text)
+    text = _normalize_geo_aliases_in_text(_normalize(text))
     if not text:
         return []
 
     found: List[str] = []
     all_geo_tokens = sorted(
-        all_country_names() + list(_ALL_REGIONS) + list(GEO_ALIAS_MAP.keys()),
+        all_country_names() + list(_ALL_REGIONS) + list(GEO_ALIAS_MAP.values()),
         key=len,
         reverse=True,
     )
@@ -289,249 +278,71 @@ def _find_geo_tokens_in_text(text: str) -> List[str]:
     return _dedupe_keep_order(found)
 
 
-def _find_geo_after_marker(prompt_lower: str, marker_patterns: List[str], mode: str = "generic") -> List[str]:
-    found: List[str] = []
-    all_geo_tokens = sorted(
-        all_country_names() + list(_ALL_REGIONS) + list(GEO_ALIAS_MAP.keys()),
-        key=len,
-        reverse=True,
-    )
-
-    for marker in marker_patterns:
-        for item in all_geo_tokens:
-            for m in re.finditer(
-                rf"({marker})\s+{re.escape(item)}(?:\s*(?:,|and|or)\s*([a-zA-Z\s,\-]+))?",
-                prompt_lower,
-            ):
-                start = m.start()
-                left_ctx = prompt_lower[max(0, start - 50):start]
-                whole_ctx = prompt_lower[max(0, start - 80):min(len(prompt_lower), m.end() + 40)]
-
-                if mode == "include":
-                    if any(cue in left_ctx for cue in NEGATIVE_GEO_CUES):
-                        continue
-                    if re.search(
-                        r"\b(?:no|without|not|exclude|excluding|reject|remove|avoid|outside|except|do not have|does not have|has no|with no)\b",
-                        whole_ctx,
-                    ):
-                        continue
-
-                names = [item]
-                tail = m.group(2) or ""
-                if tail:
-                    names.extend(_find_geo_tokens_in_text(tail))
-
-                for n in names:
-                    found.extend(_expand_geo_name(n))
-
-    return _dedupe_keep_order(found)
+def _extract_country_list_from_text(text: str) -> List[str]:
+    countries: List[str] = []
+    for token in _find_geo_tokens_in_text(text):
+        countries.extend(_expand_geo_name(token))
+    return _dedupe_keep_order(countries)
 
 
-def _looks_like_presence_exclusion(prompt_lower: str) -> bool:
-    presence_patterns = [
-        r"\boperate(?:s|d|ing)?\s+outside\b",
-        r"\bwork(?:s|ed|ing)?\s+outside\b",
-        r"\bserv(?:e|es|ed|ing)?\s+outside\b",
-        r"\bactive\s+outside\b",
-        r"\bpresent\s+outside\b",
-        r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
-        r"\bwithout\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
-        r"\bhas\s+no\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
-        r"\bwith\s+no\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
-        r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|presence|operations?|legal entities?)\s+in\b",
-        r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|operations?|legal entities?)\b",
-        r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:egypt|usa|united states)\b[^.\n;]{0,20}\bpresence\b",
-    ]
-    return any(re.search(pat, prompt_lower) for pat in presence_patterns)
+def _split_sentences(text: str) -> List[str]:
+    parts = re.split(r"[.;:!?]\s*|\n+", text)
+    return [p.strip() for p in parts if p.strip()]
 
 
-def _extract_geo_from_negative_presence_phrases(prompt_lower: str) -> List[str]:
-    found: List[str] = []
-    span_patterns = [
-        r"\b(?:no|without|has no|with no|do(?:es)? not have)\b([^.:\n;]{0,180})",
-        r"\b(?:exclude|excluding|reject|remove|avoid)\b([^.:\n;]{0,180})",
-        r"\b(?:operate(?:s|d|ing)?|work(?:s|ed|ing)?|serv(?:e|es|ed|ing)?|active|present)\s+outside\b([^.:\n;]{0,180})",
-    ]
-
-    for pat in span_patterns:
-        for m in re.finditer(pat, prompt_lower):
-            span = m.group(1)
-            if "outside" in pat:
-                for token in _find_geo_tokens_in_text(span):
-                    found.extend(_expand_geo_name(token))
-                continue
-            if PRESENCE_NOUN_RE.search(span):
-                for token in _find_geo_tokens_in_text(span):
-                    found.extend(_expand_geo_name(token))
-
-    return _dedupe_keep_order(found)
+def _is_negative_sentence(sentence: str) -> bool:
+    return bool(NEGATIVE_CUE_RE.search(sentence))
 
 
-def _extract_geo_from_negative_phrases(prompt_lower: str) -> List[str]:
-    found: List[str] = []
-    span_patterns = [
-        r"\b(?:exclude|excluding|reject|remove|avoid|except|other than|not in|not from|outside)\b([^.:\n;]{0,180})",
-    ]
-    for pat in span_patterns:
-        for m in re.finditer(pat, prompt_lower):
-            span = m.group(1)
-            if PRESENCE_NOUN_RE.search(span):
-                continue
-            for token in _find_geo_tokens_in_text(span):
-                found.extend(_expand_geo_name(token))
-    return _dedupe_keep_order(found)
-
-
-def _extract_geo_from_positive_in_phrases(prompt_lower: str) -> List[str]:
-    """
-    Catch positive geography lists like:
-    - software in Norway, UK, UAE, and Saudi Arabia
-    - operations in Australia, Canada, and the UK
-
-    Only scans text before exclusion language begins, and only within
-    short sentence-bounded spans to avoid negative-cue bleed.
-    """
-    found: List[str] = []
-
-    positive_part = re.split(
-        r"\b(?:exclude|excluding|reject|remove|avoid|except|other than|not in|not from|outside|without|no|has no|with no|do(?:es)? not have)\b",
-        prompt_lower,
-        maxsplit=1,
-        flags=re.IGNORECASE,
-    )[0]
-
-    candidate_spans = re.split(r"[.;:!?]", positive_part)
-
-    for sentence in candidate_spans:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
-        for m in re.finditer(r"\bin\s+([a-zA-Z\s,\-]+)", sentence, flags=re.IGNORECASE):
-            span = m.group(1)
-
-            span = re.split(
-                r"\b(?:with|that|which|who|providing|offering|suitable|return|keep|only|where)\b",
-                span,
-                maxsplit=1,
-                flags=re.IGNORECASE,
-            )[0].strip()
-
-            geo_tokens = _find_geo_tokens_in_text(span)
-            if not geo_tokens:
-                continue
-
-            for token in geo_tokens:
-                found.extend(_expand_geo_name(token))
-
-    return _dedupe_keep_order(found)
+def _is_presence_exclusion_sentence(sentence: str) -> bool:
+    return bool(PRESENCE_NOUN_RE.search(sentence) or OUTSIDE_ACTIVITY_RE.search(sentence))
 
 
 def _extract_geography(prompt_lower: str) -> GeographyRules:
+    geo_text = _normalize_geo_aliases_in_text(prompt_lower)
+
     include: List[str] = []
     exclude: List[str] = []
     exclude_presence: List[str] = []
 
-    include_markers = [
-        r"search in",
-        r"search only in",
-        r"search within",
-        r"look in",
-        r"companies in",
-        r"vendors in",
-        r"firms in",
-        r"providers in",
-        r"software companies in",
-        r"technology companies in",
-        r"headquartered in",
-        r"based in",
-        r"located in",
-        r"from",
-        r"within",
-        r"inside",
-        r"in the following regions",
-        r"in the following countries",
-        r"in the following regions only",
-        r"in the following countries only",
-    ]
+    sentences = _split_sentences(geo_text)
 
-    exclude_markers = [
-        r"outside", r"excluding", r"exclude", r"except", r"not in",
-        r"not from", r"other than", r"beyond", r"avoid", r"reject", r"remove",
-    ]
+    # Positive side: take only sentences before the first negative/exclusion sentence
+    positive_sentences: List[str] = []
+    for s in sentences:
+        if _is_negative_sentence(s):
+            break
+        positive_sentences.append(s)
 
-    presence_markers = [
-        r"operate(?:s|d|ing)? outside",
-        r"operating outside",
-        r"work(?:s|ed|ing)? outside",
-        r"working outside",
-        r"serv(?:e|es|ed|ing)? outside",
-        r"serving outside",
-        r"active outside",
-        r"present outside",
-        r"no branches in",
-        r"without branches in",
-        r"no offices in",
-        r"without offices in",
-        r"no presence in",
-        r"without presence in",
-        r"do not have offices in",
-        r"does not have offices in",
-        r"do not have branches in",
-        r"does not have branches in",
-        r"do not have subsidiaries in",
-        r"does not have subsidiaries in",
-        r"do not have local entities in",
-        r"does not have local entities in",
-    ]
+    positive_part = " ".join(positive_sentences).strip()
 
-    exclude_presence.extend(_extract_geo_from_negative_presence_phrases(prompt_lower))
-    exclude.extend(_extract_geo_from_negative_phrases(prompt_lower))
-    include.extend(_extract_geo_from_positive_in_phrases(prompt_lower))
+    # Any geography explicitly mentioned in the positive part is treated as include geography
+    if positive_part:
+        include.extend(_extract_country_list_from_text(positive_part))
 
-    include.extend(_find_geo_after_marker(prompt_lower, include_markers, mode="include"))
-    exclude.extend(_find_geo_after_marker(prompt_lower, exclude_markers, mode="exclude"))
-    exclude_presence.extend(_find_geo_after_marker(prompt_lower, presence_markers, mode="exclude_presence"))
+    # Negative side: parse sentence by sentence so positive countries cannot leak into exclusion buckets
+    for s in sentences:
+        if not _is_negative_sentence(s):
+            continue
 
-    all_mentioned = find_countries_in_text(prompt_lower)
-    for country in all_mentioned:
-        for m in re.finditer(r"\b" + re.escape(country) + r"\b", prompt_lower):
-            left = prompt_lower[max(0, m.start() - 90):m.start()]
-            right = prompt_lower[m.end():min(len(prompt_lower), m.end() + 90)]
-            window = left + country + right
+        countries = _extract_country_list_from_text(s)
+        if not countries:
+            continue
 
-            if (
-                (NEGATIVE_CUE_RE.search(left) and PRESENCE_NOUN_RE.search(window))
-                or re.search(
-                    r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities)\b\s+in\s+"
-                    + re.escape(country) + r"\b",
-                    window,
-                )
-                or re.search(
-                    r"\b" + re.escape(country) + r"\b\s+(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities)\b",
-                    window,
-                )
-            ):
-                exclude_presence.append(country)
-                continue
-
-            if NEGATIVE_CUE_RE.search(left):
-                exclude.append(country)
-                continue
+        if _is_presence_exclusion_sentence(s):
+            exclude_presence.extend(countries)
+        else:
+            exclude.extend(countries)
 
     include = _dedupe_keep_order(include)
     exclude = _dedupe_keep_order(exclude)
     exclude_presence = _dedupe_keep_order(exclude_presence)
 
-    if _looks_like_presence_exclusion(prompt_lower) and exclude and not exclude_presence:
-        exclude_presence = list(exclude)
-        exclude = []
-
-    include = [c for c in include if c not in exclude and c not in exclude_presence]
-
-    # hard protection: never let an explicitly included country remain in excludes
+    # If an included country appears in negative buckets, include wins
     exclude_presence = [c for c in exclude_presence if c not in include]
     exclude = [c for c in exclude if c not in include]
+
+    # Presence exclusion is stronger than HQ exclusion
     exclude = [c for c in exclude if c not in exclude_presence]
 
     strict_mode = bool(include or exclude or exclude_presence)
@@ -604,26 +415,12 @@ def _extract_target_category(prompt_lower: str) -> str:
         return "service_company"
 
     digital_patterns = [
-        r"\bdigital\b",
-        r"\bsoftware\b",
-        r"\bsaas\b",
-        r"\bplatform(?:s)?\b",
-        r"\banalytics\b",
-        r"\bautomation\b",
-        r"\bcloud\b",
-        r"\biot\b",
-        r"\bscada\b",
-        r"\bapp(?:application)?\b",
-        r"\bdata company\b",
-        r"\btech company\b",
-        r"\btechnology (?:provider|vendor|company|companies)\b",
-        r"\bai company\b",
-        r"\bai companies\b",
-        r"\bmachine learning\b",
-        r"\bartificial intelligence\b",
-        r"\bmonitoring\b",
-        r"\boptimization\b",
-        r"\boptimisation\b",
+        r"\bdigital\b", r"\bsoftware\b", r"\bsaas\b", r"\bplatform(?:s)?\b",
+        r"\banalytics\b", r"\bautomation\b", r"\bcloud\b", r"\biot\b",
+        r"\bscada\b", r"\bapp(?:application)?\b", r"\bdata company\b",
+        r"\btech company\b", r"\btechnology (?:provider|vendor|company|companies)\b",
+        r"\bai company\b", r"\bai companies\b", r"\bmachine learning\b",
+        r"\bartificial intelligence\b", r"\bmonitoring\b", r"\boptimization\b", r"\boptimisation\b",
     ]
     if any(re.search(pat, prompt_lower) for pat in digital_patterns):
         return "software_company"
@@ -633,6 +430,7 @@ def _extract_target_category(prompt_lower: str) -> str:
 
 def _normalize_industry_candidate(text: str) -> str:
     text = _normalize(text)
+
     text = re.sub(r"\boil\s*(?:&|and)?\s*gas\b", "oil and gas", text)
     text = re.sub(r"\boil\s+gas\b", "oil and gas", text)
 
@@ -687,6 +485,7 @@ def _clean_topic_text(text: str) -> str:
         text = re.split(pat, text)[0].strip()
 
     geo_words = set(all_country_names())
+    geo_words.update(GEO_ALIAS_MAP.keys())
     state_words = set(_ALL_SUBNATIONAL.keys())
     attr_noise = {
         "email", "emails", "phone", "phones", "contact", "number", "numbers",
@@ -709,11 +508,13 @@ def _clean_topic_text(text: str) -> str:
 
     cleaned = " ".join(words).strip()
     cleaned = _normalize_industry_candidate(cleaned)
+
     return cleaned
 
 
 def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
     geo_words = set(all_country_names())
+    geo_words.update(GEO_ALIAS_MAP.keys())
     state_words = set(_ALL_SUBNATIONAL.keys())
 
     entity_words = {
