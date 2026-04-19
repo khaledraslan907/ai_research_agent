@@ -45,9 +45,10 @@ class TaskSpec:
     target_category: str = "general"   # general | service_company | software_company
     industry: str = ""                 # domain / vertical, e.g. "oil and gas"
 
-    # New fields
+    # exact user-typed technical families
     solution_keywords: List[str] = field(default_factory=list)
-    # examples: ["ai", "analytics", "monitoring", "optimization", "automation"]
+    # exact user-typed domain/use-case phrases
+    domain_keywords: List[str] = field(default_factory=list)
 
     commercial_intent: str = "general"
     # general | agent_or_distributor | reseller | partner
