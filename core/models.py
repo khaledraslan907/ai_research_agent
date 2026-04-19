@@ -106,7 +106,7 @@ class CompanyRecord:
 
 
 # ---------------------------------------------------------------------------
-# Search specification (used by scorer)
+# Search specification (used by scorer / downstream filtering)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -115,6 +115,12 @@ class SearchSpec:
     entity_type: str = "company"
     intent_type: str = "general"
     sector: str = ""
+
+    # New structured intent fields
+    target_category: str = "general"   # general | service_company | software_company
+    solution_keywords: List[str] = field(default_factory=list)
+    commercial_intent: str = "general"  # general | agent_or_distributor | reseller | partner
+
     include_terms: List[str] = field(default_factory=list)
     exclude_terms: List[str] = field(default_factory=list)
     include_countries: List[str] = field(default_factory=list)
@@ -125,6 +131,9 @@ class SearchSpec:
     max_results: int = 25
     mode: str = "Balanced"
     language: str = "en"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +163,10 @@ class SearchBudget:
 
 @dataclass
 class ProviderSettings:
-    use_ddg:      bool = True
-    use_exa:      bool = True
-    use_tavily:   bool = True
-    use_serpapi:  bool = False
+    use_ddg: bool = True
+    use_exa: bool = True
+    use_tavily: bool = True
+    use_serpapi: bool = False
     use_firecrawl: bool = True
     use_llm_parser: bool = False
     use_uploaded_seed_dedupe: bool = True
