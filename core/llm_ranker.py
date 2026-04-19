@@ -1,9 +1,3 @@
-"""
-llm_ranker.py
-=============
-LLM-based result re-ranking and verification.
-"""
-
 from __future__ import annotations
 
 from typing import List, Optional
@@ -20,28 +14,16 @@ def rerank_records(
     llm: Optional[FreeLLMClient],
     batch_size: int = 30,
 ) -> List[CompanyRecord]:
-    """
-    Re-rank and filter records using LLM judgment.
-
-    Records with LLM score < 4 get their confidence_score reduced strongly.
-    Records with LLM score >= 8 get a strong bonus.
-    This softly adjusts scores rather than hard-rejecting immediately.
-    """
     if not llm or not llm.is_available() or not records:
         return records
 
     entity = task_spec.target_entity_types[0] if task_spec.target_entity_types else "company"
-
-    # combine exclusion context for the reranker
     exclude_hq = ", ".join(task_spec.geography.exclude_countries) if task_spec.geography.exclude_countries else "none"
-    exclude_presence = (
-        ", ".join(task_spec.geography.exclude_presence_countries)
-        if task_spec.geography.exclude_presence_countries else "none"
-    )
+    exclude_presence = ", ".join(task_spec.geography.exclude_presence_countries) if task_spec.geography.exclude_presence_countries else "none"
     exclude_context = f"HQ exclude: {exclude_hq}; Presence exclude: {exclude_presence}"
 
     for start in range(0, len(records), batch_size):
-        batch = records[start: start + batch_size]
+        batch = records[start:start + batch_size]
         _apply_llm_ranking(batch, task_spec, entity, exclude_context, llm)
 
     return records
@@ -50,10 +32,10 @@ def rerank_records(
 def _task_context_text(task_spec: TaskSpec, entity_type: str) -> tuple[str, str]:
     category = (getattr(task_spec, "target_category", "general") or "general").strip()
     solution_keywords = list(getattr(task_spec, "solution_keywords", []) or [])
+    domain_keywords = list(getattr(task_spec, "domain_keywords", []) or [])
     commercial_intent = (getattr(task_spec, "commercial_intent", "general") or "general").strip()
 
     user_request = (task_spec.raw_prompt or "")[:300]
-
     topic = task_spec.industry or "unknown"
     topic_parts = [topic]
 
@@ -61,6 +43,8 @@ def _task_context_text(task_spec: TaskSpec, entity_type: str) -> tuple[str, str]
         topic_parts.append(f"category={category}")
     if solution_keywords:
         topic_parts.append(f"solution_keywords={', '.join(solution_keywords[:6])}")
+    if domain_keywords:
+        topic_parts.append(f"domain_keywords={', '.join(domain_keywords[:6])}")
     if commercial_intent != "general":
         topic_parts.append(f"commercial_intent={commercial_intent}")
     topic_parts.append(f"entity_type={entity_type}")
@@ -75,8 +59,6 @@ def _apply_llm_ranking(
     exclude_countries: str,
     llm: FreeLLMClient,
 ) -> None:
-    """Apply LLM ranking to a batch of records. Modifies records in place."""
-
     lines = []
     for i, r in enumerate(batch):
         name = (r.company_name or "Unknown")[:60]
@@ -106,8 +88,7 @@ def _apply_llm_ranking(
     verdict_map = {}
     for v in verdicts:
         if isinstance(v, dict) and "index" in v:
-            idx = int(v["index"])
-            verdict_map[idx] = v
+            verdict_map[int(v["index"])] = v
 
     for i, rec in enumerate(batch):
         verdict = verdict_map.get(i)
@@ -133,21 +114,12 @@ def _apply_llm_ranking(
         if not keep:
             rec.confidence_score = max(0.0, rec.confidence_score - 15)
 
-        # If the LLM explicitly says it is media/blog/directory/news, make that visible
         reason_l = reason.lower()
         if any(x in reason_l for x in ["directory", "news", "media", "blog", "list page", "ranking"]):
             rec.is_directory_or_media = True
 
 
-def quick_relevance_check(
-    record: CompanyRecord,
-    topic: str,
-    llm: Optional[FreeLLMClient],
-) -> bool:
-    """
-    Quick single-record relevance check.
-    Use sparingly — batch ranking (rerank_records) is much more efficient.
-    """
+def quick_relevance_check(record: CompanyRecord, topic: str, llm: Optional[FreeLLMClient]) -> bool:
     if not llm or not llm.is_available():
         return True
 
