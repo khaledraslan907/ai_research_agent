@@ -49,8 +49,8 @@ def _is_directory_title(title: str) -> bool:
 class SearchOrchestrator:
 
     def __init__(self):
-        self.cache            = CacheManager()
-        self.company_index    = CompanyIndex()
+        self.cache = CacheManager()
+        self.company_index = CompanyIndex()
         self.struct_extractor = StructuredDataExtractor()
 
     # ==================================================================
@@ -69,9 +69,9 @@ class SearchOrchestrator:
     ) -> Dict[str, Any]:
 
         provider_settings = provider_settings or ProviderSettings()
-        budget_overrides  = budget_overrides  or {}
-        user_keys         = user_keys         or {}
-        logs: List[str]   = []
+        budget_overrides = budget_overrides or {}
+        user_keys = user_keys or {}
+        logs: List[str] = []
 
         def _log(msg: str):
             logs.append(msg)
@@ -81,11 +81,11 @@ class SearchOrchestrator:
         resolved_keys = resolve_provider_keys(task_spec.credential_mode.mode, user_keys)
 
         llm_client = FreeLLMClient(
-            groq_api_key       = resolved_keys.groq_api_key,
-            gemini_api_key     = resolved_keys.gemini_api_key,
-            openrouter_api_key = resolved_keys.openrouter_api_key,
-            anthropic_api_key  = resolved_keys.anthropic_api_key,
-            openai_api_key     = resolved_keys.openai_api_key,
+            groq_api_key=resolved_keys.groq_api_key,
+            gemini_api_key=resolved_keys.gemini_api_key,
+            openrouter_api_key=resolved_keys.openrouter_api_key,
+            anthropic_api_key=resolved_keys.anthropic_api_key,
+            openai_api_key=resolved_keys.openai_api_key,
         )
         if llm_client.is_available():
             _log(f"LLM backends available: {', '.join(llm_client.available_backends())}")
@@ -94,28 +94,32 @@ class SearchOrchestrator:
 
         # disable providers without keys
         if task_spec.credential_mode.mode == "free":
-            if not resolved_keys.exa_api_key:       provider_settings.use_exa       = False
-            if not resolved_keys.tavily_api_key:     provider_settings.use_tavily    = False
-            if not resolved_keys.serpapi_key:        provider_settings.use_serpapi   = False
-            if not resolved_keys.firecrawl_api_key:  provider_settings.use_firecrawl = False
+            if not resolved_keys.exa_api_key:
+                provider_settings.use_exa = False
+            if not resolved_keys.tavily_api_key:
+                provider_settings.use_tavily = False
+            if not resolved_keys.serpapi_key:
+                provider_settings.use_serpapi = False
+            if not resolved_keys.firecrawl_api_key:
+                provider_settings.use_firecrawl = False
 
         if task_spec.mode.lower() == "fast":
             provider_settings.use_llm_parser = False
             task_spec.use_cloud_llm = False
 
-        ddg     = DDGProvider()
-        exa     = ExaProvider(api_key=resolved_keys.exa_api_key)
-        tavily  = TavilyProvider(api_key=resolved_keys.tavily_api_key)
+        ddg = DDGProvider()
+        exa = ExaProvider(api_key=resolved_keys.exa_api_key)
+        tavily = TavilyProvider(api_key=resolved_keys.tavily_api_key)
         serpapi = SerpApiProvider(api_key=resolved_keys.serpapi_key)
         scraper = WebsiteScraper(
             use_firecrawl=provider_settings.use_firecrawl,
             firecrawl_api_key=resolved_keys.firecrawl_api_key,
         )
         local_llm = LocalLLMProvider(
-            groq_api_key      = resolved_keys.groq_api_key,
-            gemini_api_key    = resolved_keys.gemini_api_key,
-            openai_api_key    = resolved_keys.openai_api_key,
-            anthropic_api_key = resolved_keys.anthropic_api_key,
+            groq_api_key=resolved_keys.groq_api_key,
+            gemini_api_key=resolved_keys.gemini_api_key,
+            openai_api_key=resolved_keys.openai_api_key,
+            anthropic_api_key=resolved_keys.anthropic_api_key,
         )
 
         execution_plan = build_execution_plan(task_spec, provider_settings)
@@ -126,20 +130,32 @@ class SearchOrchestrator:
             s = self.company_index.summary()
             _log(f"Loaded seed: {s['known_companies']} companies, {s['known_domains']} domains.")
 
-        budget         = self._build_budget(task_spec.mode, provider_settings, budget_overrides, execution_plan, task_spec.max_results)
+        budget = self._build_budget(
+            task_spec.mode,
+            provider_settings,
+            budget_overrides,
+            execution_plan,
+            task_spec.max_results,
+        )
         budget_manager = BudgetManager(budget)
 
         all_planned_queries = plan_queries(task_spec, llm=llm_client)
         _log(
             f"Queries planned — "
-            f"DDG:{len(all_planned_queries.get('ddg',[]))} "
-            f"Exa:{len(all_planned_queries.get('exa',[]))} "
-            f"Tavily:{len(all_planned_queries.get('tavily',[]))}"
+            f"DDG:{len(all_planned_queries.get('ddg', []))} "
+            f"Exa:{len(all_planned_queries.get('exa', []))} "
+            f"Tavily:{len(all_planned_queries.get('tavily', []))} "
+            f"SerpApi:{len(all_planned_queries.get('serpapi', []))}"
         )
 
+        if getattr(task_spec, "solution_keywords", None):
+            _log(f"Solution keywords: {', '.join(task_spec.solution_keywords)}")
+        if getattr(task_spec, "commercial_intent", "general") != "general":
+            _log(f"Commercial intent: {task_spec.commercial_intent}")
+
         all_search_results: List[SearchResult] = []
-        records:            List[CompanyRecord] = []
-        seen_domains:       Set[str]            = set()
+        records: List[CompanyRecord] = []
+        seen_domains: Set[str] = set()
 
         # Stage 1 — DDG
         if provider_settings.use_ddg and execution_plan.use_ddg:
@@ -156,28 +172,25 @@ class SearchOrchestrator:
 
         # Stage 2 — Exa
         if provider_settings.use_exa and execution_plan.use_exa and exa.is_available():
-            exa_cap     = execution_plan.max_queries_per_provider.get("exa", 4)
+            exa_cap = execution_plan.max_queries_per_provider.get("exa", 4)
             exa_queries = all_planned_queries.get("exa", [])[:exa_cap]
             _log(f"Stage 2 Exa: {len(exa_queries)} queries (cap={exa_cap}).")
             exa_max = 15 if (task_spec.max_results or 25) > 50 else 10
 
-            # For people_search: ALL queries must be linkedin_exa type
-            # Run every linkedin_exa query through search_linkedin_profiles()
             if task_spec.task_type == "people_search":
                 linkedin_qs = [q for q in exa_queries if q.family == "linkedin_exa"]
-                normal_qs   = [q for q in exa_queries if q.family != "linkedin_exa"]
+                normal_qs = [q for q in exa_queries if q.family != "linkedin_exa"]
                 exa_results = []
                 if linkedin_qs:
                     _log(f"  Exa LinkedIn-scoped: {len(linkedin_qs)} queries → linkedin.com/in only")
                     exa_results.extend(
                         self._run_exa_linkedin_queries(exa, linkedin_qs, budget_manager, exa_max, logs)
                     )
-                # Discard non-linkedin EXA queries for people_search
-                # (they would return companies, not people)
                 if normal_qs:
                     _log(f"  Skipping {len(normal_qs)} non-linkedin EXA queries for people_search")
             else:
                 exa_results = self._run_provider_queries(exa, "exa", exa_queries, budget_manager, exa_max, logs)
+
             all_search_results.extend(exa_results)
             records.extend(self._results_to_records(
                 exa_results, seen_domains, budget_manager, logs,
@@ -191,7 +204,8 @@ class SearchOrchestrator:
             seed_urls = [r.website for r in sorted(records, key=lambda x: x.confidence_score, reverse=True) if r.website][:3]
             _log(f"Stage 2b Exa find_similar: {len(seed_urls)} seeds.")
             for seed_url in seed_urls:
-                if not budget_manager.can_use_provider("exa"): break
+                if not budget_manager.can_use_provider("exa"):
+                    break
                 cached = self.cache.get_query("exa_similar", seed_url, 5)
                 if cached:
                     similar_results = [SearchResult(**item) for item in cached]
@@ -239,11 +253,9 @@ class SearchOrchestrator:
         _log(f"After dedup: {len(records)}")
 
         search_spec = self._task_to_search_spec(task_spec)
-        records     = score_records(records, search_spec)
+        records = score_records(records, search_spec)
         records.sort(key=lambda x: x.confidence_score, reverse=True)
 
-        # Skip LLM re-ranking for people_search — profiles accepted by URL rule,
-        # not by content scoring. Re-ranking adds latency without benefit here.
         if (
             llm_client.is_available()
             and records
@@ -254,7 +266,7 @@ class SearchOrchestrator:
             records = rerank_records(records=records, task_spec=task_spec, llm=llm_client, batch_size=40)
             records.sort(key=lambda x: x.confidence_score, reverse=True)
 
-        final_records:    List[CompanyRecord] = []
+        final_records: List[CompanyRecord] = []
         rejected_records: List[CompanyRecord] = []
 
         for rec in records:
@@ -282,18 +294,18 @@ class SearchOrchestrator:
         )
 
         return {
-            "task_spec":          task_spec.to_dict(),
-            "execution_plan":     execution_plan.to_dict(),
-            "queries":            {k: [q.to_dict() for q in v] for k, v in all_planned_queries.items()},
-            "records":            [r.to_dict() for r in final_records],
-            "rejected_records":   [r.to_dict() for r in rejected_records],
-            "logs":               logs,
-            "budget":             budget_manager.summary(),
-            "company_index":      self.company_index.summary(),
-            "resolved_keys":      resolved_keys.to_dict(),
-            "llm_backends":       llm_client.available_backends(),
-            "export_path":        str(export_path) if export_path else "",
-            "total_found":        len(final_records),
+            "task_spec": task_spec.to_dict(),
+            "execution_plan": execution_plan.to_dict(),
+            "queries": {k: [q.to_dict() for q in v] for k, v in all_planned_queries.items()},
+            "records": [r.to_dict() for r in final_records],
+            "rejected_records": [r.to_dict() for r in rejected_records],
+            "logs": logs,
+            "budget": budget_manager.summary(),
+            "company_index": self.company_index.summary(),
+            "resolved_keys": resolved_keys.to_dict(),
+            "llm_backends": llm_client.available_backends(),
+            "export_path": str(export_path) if export_path else "",
+            "total_found": len(final_records),
             "raw_search_results": len(all_search_results),
         }
 
@@ -358,7 +370,6 @@ class SearchOrchestrator:
                 logs.append("EXA budget cap reached.")
                 break
             q_text = query.text if hasattr(query, "text") else str(query)
-            cache_key = f"exa_linkedin_{q_text}"
             cached = self.cache.get_query("exa_linkedin", q_text, max_results_per_query)
             if cached:
                 results = [SearchResult(**item) for item in cached]
@@ -389,8 +400,8 @@ class SearchOrchestrator:
         max_candidates: int = 50,
         use_llm_classifier: bool = False,
     ) -> List[CompanyRecord]:
-        records:   List[CompanyRecord] = []
-        processed: int                 = 0
+        records: List[CompanyRecord] = []
+        processed: int = 0
 
         exclude_countries = [c.lower() for c in (task_spec.geography.exclude_countries or [])]
 
@@ -407,7 +418,6 @@ class SearchOrchestrator:
                 url_key = res.url.lower().rstrip("/")
                 if url_key in seen_domains:
                     continue
-                # Check against seed file: skip if already in uploaded results
                 from core.people_search import extract_person_from_linkedin_result
                 _name_preview = extract_person_from_linkedin_result(
                     res.title, res.url, res.snippet
@@ -419,7 +429,6 @@ class SearchOrchestrator:
                 # ── Company/paper search: deduplicate by domain ────────────
                 if domain in seen_domains:
                     continue
-                # Only skip seed-file matches when we have enough results capacity
                 _skip_known = self.company_index.contains_company(res.title, domain)
                 if _skip_known and (task_spec.max_results or 25) <= 50:
                     logs.append(f"Skip (known): {domain}")
@@ -434,30 +443,23 @@ class SearchOrchestrator:
 
             if is_linkedin:
                 if task_spec.task_type == "people_search":
-                    # For people_search: ONLY accept /in/ personal profiles
-                    # REJECT /company/ pages completely
                     from core.people_search import is_linkedin_profile_url, is_linkedin_company_url
                     if is_linkedin_company_url(res.url):
                         logs.append(f"Skip (LinkedIn company page, want /in/): {res.url[:60]}")
                         continue
                     if not is_linkedin_profile_url(res.url):
-                        # Unknown LinkedIn URL type — skip to be safe
                         logs.append(f"Skip (LinkedIn non-profile URL): {res.url[:60]}")
                         continue
-                    # Valid /in/ profile — proceed (don't hit the EXCLUDED_DOMAINS check)
                 else:
-                    # Not a people_search — skip all LinkedIn URLs as before
                     logs.append(f"Skip (excluded domain): {domain}")
                     continue
 
-            # Skip globally excluded domains (non-LinkedIn)
             elif domain in EXCLUDED_DOMAINS or any(domain.endswith("." + d) for d in EXCLUDED_DOMAINS):
                 logs.append(f"Skip (excluded domain): {domain}")
                 continue
 
             # ── Title-based directory detection (before any scraping) ──────────
-            if task_spec.task_type not in {"document_research", "people_search"} \
-                    and _is_directory_title(res.title):
+            if task_spec.task_type not in {"document_research", "people_search"} and _is_directory_title(res.title):
                 logs.append(f"Skip (directory title): {res.title[:60]}")
                 continue
 
@@ -479,20 +481,19 @@ class SearchOrchestrator:
                         logs.append(f"Skip (US URL path): {res.url[:60]}")
                         continue
 
-            # Mark as seen — people_search uses full URL, others use domain
             if task_spec.task_type == "people_search":
                 seen_domains.add(res.url.lower().rstrip("/"))
             else:
                 seen_domains.add(domain)
 
             company = CompanyRecord(
-                company_name    = res.title.strip(),
-                website         = res.url,
-                domain          = domain,
-                description     = res.snippet.strip(),
-                source_url      = res.url,
-                source_provider = res.provider,
-                raw_sources     = [res.to_dict()],
+                company_name=res.title.strip(),
+                website=res.url,
+                domain=domain,
+                description=res.snippet.strip(),
+                source_url=res.url,
+                source_provider=res.provider,
+                raw_sources=[res.to_dict()],
             )
 
             # ── PEOPLE SEARCH: extract from snippet, never scrape LinkedIn ────
@@ -503,19 +504,18 @@ class SearchOrchestrator:
                     url=res.url,
                     snippet=res.snippet,
                 )
-                # Use extracted name as the record name (falls back to title)
-                company.company_name     = info.get("name", "") or res.title
-                company.job_title        = info.get("job_title", "")
-                company.employer_name    = info.get("employer", "")
-                company.city             = info.get("location", "")
-                company.linkedin_url     = res.url
+                company.company_name = info.get("name", "") or res.title
+                company.job_title = info.get("job_title", "")
+                company.employer_name = info.get("employer", "")
+                company.city = info.get("location", "")
+                company.linkedin_url = res.url
                 company.linkedin_profile = res.url
-                company.page_type        = "person"
+                company.page_type = "person"
                 company.is_directory_or_media = False
                 company.confidence_score = 85.0
                 records.append(company)
                 processed += 1
-                continue   # ← skip ALL scraping for people search
+                continue
 
             # try scrape cache
             cached_scrape = self.cache.get_scrape(domain)
@@ -553,22 +553,22 @@ class SearchOrchestrator:
         return records
 
     def _apply_scrape_cache(self, company: CompanyRecord, cached: dict):
-        company.company_name        = cached.get("company_name",       company.company_name)
-        company.description         = cached.get("description",         company.description)
-        company.email               = cached.get("email",              "")
-        company.phone               = cached.get("phone",              "")
-        company.hq_country          = cached.get("hq_country",         "")
-        company.country             = cached.get("country",            "")
-        company.presence_countries  = cached.get("presence_countries", [])
-        company.contact_page        = cached.get("contact_page",       "")
-        company.linkedin_url        = cached.get("linkedin_url",       "")
-        company.has_usa_presence    = cached.get("has_usa_presence",   False)
-        company.has_egypt_presence  = cached.get("has_egypt_presence", False)
+        company.company_name = cached.get("company_name", company.company_name)
+        company.description = cached.get("description", company.description)
+        company.email = cached.get("email", "")
+        company.phone = cached.get("phone", "")
+        company.hq_country = cached.get("hq_country", "")
+        company.country = cached.get("country", "")
+        company.presence_countries = cached.get("presence_countries", [])
+        company.contact_page = cached.get("contact_page", "")
+        company.linkedin_url = cached.get("linkedin_url", "")
+        company.has_usa_presence = cached.get("has_usa_presence", False)
+        company.has_egypt_presence = cached.get("has_egypt_presence", False)
         company.is_directory_or_media = cached.get("is_directory_or_media", False)
-        company.page_type           = cached.get("page_type",          "")
-        company.notes               = cached.get("notes",              "")
-        company.authors             = cached.get("authors",            "")
-        company.doi                 = cached.get("doi",                "")
+        company.page_type = cached.get("page_type", "")
+        company.notes = cached.get("notes", "")
+        company.authors = cached.get("authors", "")
+        company.doi = cached.get("doi", "")
 
     def _apply_crawl_to_record(
         self,
@@ -578,10 +578,9 @@ class SearchOrchestrator:
         task_spec: TaskSpec,
     ):
         company.company_name = crawl.detected_company_name or company.company_name
-        company.description  = crawl.meta_description or company.description
+        company.description = crawl.meta_description or company.description
 
         if task_spec.task_type != "document_research":
-            # structured extraction (JSON-LD, schema.org, meta tags)
             structured = self.struct_extractor.extract_from_html(
                 html=getattr(crawl, "_raw_html", ""),
                 base_url=company.website or "",
@@ -594,8 +593,8 @@ class SearchOrchestrator:
                     existing_phones=crawl.phones,
                     max_probes=2,
                 )
-                structured["emails"]  = structured.get("emails", []) + probed.get("emails", [])
-                structured["phones"]  = structured.get("phones", []) + probed.get("phones", [])
+                structured["emails"] = structured.get("emails", []) + probed.get("emails", [])
+                structured["phones"] = structured.get("phones", []) + probed.get("phones", [])
                 if not structured.get("linkedin_url") and probed.get("linkedin_url"):
                     structured["linkedin_url"] = probed["linkedin_url"]
 
@@ -603,17 +602,16 @@ class SearchOrchestrator:
             all_emails = unique_list(structured.get("emails", []) + crawl.emails)
             all_phones = unique_list(structured.get("phones", []) + crawl.phones)
 
-            company.email        = all_emails[0] if all_emails else ""
-            company.phone        = all_phones[0] if all_phones else ""
+            company.email = all_emails[0] if all_emails else ""
+            company.phone = all_phones[0] if all_phones else ""
             company.contact_page = crawl.contact_links[0] if crawl.contact_links else ""
-            company.linkedin_url = (structured.get("linkedin_url")
-                                    or crawl.social_links.get("linkedin", ""))
+            company.linkedin_url = (structured.get("linkedin_url") or crawl.social_links.get("linkedin", ""))
 
-            structured_hq      = structured.get("hq_country", "")
+            structured_hq = structured.get("hq_country", "")
             company.hq_country = structured_hq or crawl.detected_hq_country or ""
-            company.country    = company.hq_country
+            company.country = company.hq_country
             company.presence_countries = crawl.detected_presence_countries or []
-            company.has_usa_presence   = "usa" in [c.lower() for c in company.presence_countries]
+            company.has_usa_presence = "usa" in [c.lower() for c in company.presence_countries]
             company.has_egypt_presence = "egypt" in [c.lower() for c in company.presence_countries]
 
             if not company.company_name and structured.get("company_name"):
@@ -636,18 +634,15 @@ class SearchOrchestrator:
                 company.page_type = "unknown"
             company.is_directory_or_media = False
 
-            # extract authors from description (even without successful scrape)
             if not company.authors:
                 company.authors = self._extract_authors_from_text(
                     company.description or ""
                 )
-            # DOI extraction
             if not company.doi:
                 doi_m = re.search(r"10\.\d{4,}/\S+", company.description or "")
                 if doi_m:
                     company.doi = f"https://doi.org/{doi_m.group()}"
         else:
-            # Title-based directory detection on the crawled title too
             if _is_directory_title(company.company_name):
                 company.page_type = "directory"
                 company.is_directory_or_media = True
@@ -667,13 +662,13 @@ class SearchOrchestrator:
         self, company: CompanyRecord, crawl, task_spec: TaskSpec,
         local_llm: LocalLLMProvider, logs: List[str],
     ):
-        llm_page       = local_llm.classify_company_page(
+        llm_page = local_llm.classify_company_page(
             title=company.company_name or "",
             url=company.website or "",
             text=crawl.text or company.description or "",
             sector=task_spec.industry or "oil and gas",
         )
-        llm_page_type  = (llm_page.get("page_type") or "").lower()
+        llm_page_type = (llm_page.get("page_type") or "").lower()
         llm_confidence = int(llm_page.get("confidence", 50))
 
         if llm_page_type and llm_page_type != "unknown":
@@ -691,13 +686,11 @@ class SearchOrchestrator:
         )
         if llm_presence.get("hq_country") and not company.hq_country:
             company.hq_country = llm_presence["hq_country"]
-            company.country    = llm_presence["hq_country"]
+            company.country = llm_presence["hq_country"]
 
     def _extract_authors_from_text(self, text: str) -> str:
         """
         Multi-strategy author extraction from academic paper descriptions.
-        Handles: MDPI, PMC, ADS/Harvard, IJERT, medical journals, "written by" patterns.
-        Returns empty string if no confident match found.
         """
         if not text:
             return ""
@@ -712,12 +705,12 @@ class SearchOrchestrator:
         }
 
         def _valid(s):
-            if not s or len(s) < 5: return False
+            if not s or len(s) < 5:
+                return False
             return not (set(s.lower().split()[:3]) & ABSTRACT_WORDS)
 
         candidates = []
 
-        # A: ADS-style asterisk list  "* Lastname, Firstname; * Lastname2, Firstname2"
         m = re.search(
             r"[*]\s*([A-Z][a-zA-Zéàüöçõã-]+"
             r",\s+[A-Z][a-zA-Zéàüöçõã-]+"
@@ -727,7 +720,6 @@ class SearchOrchestrator:
         if m:
             candidates.append(re.sub(r"[*]\s*", "", m.group(1)).strip())
 
-        # B: MDPI "First M. Last1,* First M. Last2 and First M. Last3"
         m = re.search(
             r"([A-Z][a-z]+ [A-Z][.] [A-Za-z]+\d*[,*]*"
             r"(?:,? [A-Z][a-z]+ [A-Z][.] [A-Za-z]+\d*[,*]*)*"
@@ -737,7 +729,6 @@ class SearchOrchestrator:
             raw = re.sub(r"[\d*]+", "", m.group(1)).strip().rstrip(",")
             candidates.append(raw)
 
-        # C: PMC comma style "Firstname Lastname 1, Firstname Lastname"
         m = re.search(
             r"([A-Z][a-zéáúóí]+"
             r" [A-Z][a-zéáúóí]+"
@@ -748,7 +739,6 @@ class SearchOrchestrator:
         if m:
             candidates.append(re.sub(r"\s*\d+", "", m.group(1)).strip())
 
-        # D: "written by Firstname Lastname, ..."
         m = re.search(
             r"written\s+by\s+([A-Z][a-z]+ [A-Z][a-z]+"
             r"(?:,\s+[A-Z][a-z]+ [A-Z][a-z]+)*)",
@@ -756,7 +746,6 @@ class SearchOrchestrator:
         if m:
             candidates.append(m.group(1))
 
-        # E: Surname-first "Lastname, Firstname; Lastname2, Firstname2"
         m = re.search(
             r"([A-Z][a-z]+,\s+[A-Z][a-z]+(?: [A-Z][.])?(?:;\s+"
             r"[A-Z][a-z]+,\s+[A-Z][a-z]+(?: [A-Z][.])?)+)",
@@ -764,7 +753,6 @@ class SearchOrchestrator:
         if m:
             candidates.append(m.group(1))
 
-        # F: "By Author1 and Author2" byline
         m = re.search(
             r"[Bb]y ([A-Z][a-z]+ [A-Z][a-z]+(?: and [A-Z][a-z]+ [A-Z][a-z]+)*)",
             chunk)
@@ -815,7 +803,6 @@ class SearchOrchestrator:
         min_confidence_score: int,
     ) -> Optional[str]:
 
-        # ── People search: URL-based acceptance, no scoring/geo needed ────
         if task_spec.task_type == "people_search":
             from core.people_search import is_linkedin_profile_url, is_linkedin_company_url
             url = rec.linkedin_url or rec.linkedin_profile or rec.website or ""
@@ -825,26 +812,22 @@ class SearchOrchestrator:
                 return "not_linkedin_profile"
             if not rec.company_name and not rec.job_title:
                 return "no_person_info"
-            return None  # valid personal profile — accept
+            return None
 
-        # Extract LLM rank from notes (set by llm_ranker.py)
         llm_rank = 0
         rank_m = re.search(r"llm_rank:(\d+)/10", rec.notes or "")
         if rank_m:
             llm_rank = int(rank_m.group(1))
 
-        # Score check — but bypass for high LLM rank (real company, scraper blocked)
         if rec.confidence_score < min_confidence_score:
             if llm_rank >= 8:
-                pass  # LLM confident it's real → keep despite low score
+                pass
             else:
                 return f"low_confidence({rec.confidence_score:.0f}<{min_confidence_score})"
 
-        # Directory/media check — but bypass for high LLM rank
         if rec.is_directory_or_media and llm_rank < 7:
             return "directory_or_media"
 
-        # Title-based directory detection (catches LLM misses)
         if task_spec.task_type != "document_research" and _is_directory_title(rec.company_name):
             if llm_rank >= 8:
                 rec.is_directory_or_media = False
@@ -861,34 +844,30 @@ class SearchOrchestrator:
 
     def _violates_geography(self, rec: CompanyRecord, task_spec: TaskSpec) -> bool:
         exclude_countries = [c.lower() for c in (task_spec.geography.exclude_countries or [])]
-        exclude_presence  = [c.lower() for c in (task_spec.geography.exclude_presence_countries or [])]
+        exclude_presence = [c.lower() for c in (task_spec.geography.exclude_presence_countries or [])]
         include_countries = [c.lower() for c in (task_spec.geography.include_countries or [])]
 
-        rec_hq      = (rec.hq_country or "").lower().strip()
-        rec_country = (rec.country    or "").lower().strip()
-        presence    = [c.lower().strip() for c in (rec.presence_countries or [])]
-        domain      = (rec.domain or "").lower()
+        rec_hq = (rec.hq_country or "").lower().strip()
+        rec_country = (rec.country or "").lower().strip()
+        presence = [c.lower().strip() for c in (rec.presence_countries or [])]
+        domain = (rec.domain or "").lower()
 
         if exclude_countries:
-            # 1. Confirmed HQ
             if rec_hq and rec_hq in exclude_countries:
                 return True
             if rec_country and rec_country in exclude_countries:
                 return True
 
-            # 2. Known domain lists
-            if "usa"   in exclude_countries and domain in KNOWN_USA_DOMAINS:
+            if "usa" in exclude_countries and domain in KNOWN_USA_DOMAINS:
                 return True
             if "egypt" in exclude_countries and domain in KNOWN_EGYPT_DOMAINS:
                 return True
 
-            # 3. URL path signal (/en-us/, /us/en/ etc.)
             url_lower = (rec.website or rec.source_url or "").lower()
             if "usa" in exclude_countries and not rec_hq and not rec_country:
                 if any(s in url_lower for s in ["/en-us/", "/us/en/", "/us-en/"]):
                     return True
 
-            # 4. Very specific HQ phrases in name+description only
             if not rec_hq and not rec_country:
                 STRONG_HQ_PHRASES = {
                     "usa": [
@@ -908,18 +887,19 @@ class SearchOrchestrator:
                     if any(p in name_desc for p in phrases):
                         return True
 
-        # Exclude presence
         if exclude_presence:
-            if any(p in exclude_presence for p in presence): return True
-            if "usa"   in exclude_presence and rec.has_usa_presence:   return True
-            if "egypt" in exclude_presence and rec.has_egypt_presence: return True
+            if any(p in exclude_presence for p in presence):
+                return True
+            if "usa" in exclude_presence and rec.has_usa_presence:
+                return True
+            if "egypt" in exclude_presence and rec.has_egypt_presence:
+                return True
 
-        # Include enforcement (only on confirmed geo)
         if include_countries and task_spec.geography.strict_mode:
             known_geo = bool(rec_hq or rec_country or presence)
             if known_geo:
                 matched = (
-                    (rec_hq     and rec_hq     in include_countries)
+                    (rec_hq and rec_hq in include_countries)
                     or (rec_country and rec_country in include_countries)
                     or any(p in include_countries for p in presence)
                 )
@@ -935,6 +915,7 @@ class SearchOrchestrator:
     def _task_to_search_spec(self, task_spec: TaskSpec) -> SearchSpec:
         required = list(task_spec.target_attributes or [])
         optional = list(task_spec.target_attributes or [])
+
         if task_spec.task_type == "document_research":
             required = ["website"]
             optional = ["website", "summary"]
@@ -942,13 +923,16 @@ class SearchOrchestrator:
         return SearchSpec(
             raw_prompt=task_spec.raw_prompt,
             entity_type=(task_spec.target_entity_types[0] if task_spec.target_entity_types else "company"),
-            intent_type=task_spec.target_category,
+            intent_type=task_spec.task_type,
             sector=task_spec.industry or "",
-            include_terms=[],
+            target_category=getattr(task_spec, "target_category", "general") or "general",
+            solution_keywords=list(getattr(task_spec, "solution_keywords", []) or []),
+            commercial_intent=getattr(task_spec, "commercial_intent", "general") or "general",
+            include_terms=list(getattr(task_spec, "solution_keywords", []) or []),
             exclude_terms=[],
-            include_countries=task_spec.geography.include_countries,
-            exclude_countries=task_spec.geography.exclude_countries,
-            exclude_presence_countries=task_spec.geography.exclude_presence_countries,
+            include_countries=list(task_spec.geography.include_countries or []),
+            exclude_countries=list(task_spec.geography.exclude_countries or []),
+            exclude_presence_countries=list(task_spec.geography.exclude_presence_countries or []),
             required_fields=required,
             optional_fields=optional,
             max_results=task_spec.max_results,
@@ -970,22 +954,21 @@ class SearchOrchestrator:
         The plan_builder already set the query counts; budget caps match them.
         """
         mode = (task_mode := (mode or "Balanced").lower())
-        # Treat "deep" if plan upgraded it (large max_results)
+
         if execution_plan.max_candidates_to_process >= 150:
             task_mode = "deep"
 
         def _q(p: str) -> int:
             return execution_plan.max_queries_per_provider.get(p, 0)
 
-        # Scale pages: need ~1.5 pages per candidate to allow contact probing
-        max_cand  = execution_plan.max_candidates_to_process
+        max_cand = execution_plan.max_candidates_to_process
         base_pages = max(30, int(max_cand * 1.5))
 
         if task_mode == "fast":
             budget = SearchBudget(
                 max_total_search_calls=10,
-                max_ddg_calls=_q("ddg")    if provider_settings.use_ddg    else 0,
-                max_exa_calls=_q("exa")    if provider_settings.use_exa    else 0,
+                max_ddg_calls=_q("ddg") if provider_settings.use_ddg else 0,
+                max_exa_calls=_q("exa") if provider_settings.use_exa else 0,
                 max_tavily_calls=0,
                 max_serpapi_calls=0,
                 max_pages_to_scrape=min(base_pages, 40),
@@ -993,19 +976,19 @@ class SearchOrchestrator:
         elif task_mode == "deep":
             budget = SearchBudget(
                 max_total_search_calls=60,
-                max_ddg_calls=_q("ddg")          if provider_settings.use_ddg     else 0,
-                max_exa_calls=_q("exa")          if provider_settings.use_exa     else 0,
-                max_tavily_calls=_q("tavily")    if provider_settings.use_tavily  else 0,
-                max_serpapi_calls=_q("serpapi")  if provider_settings.use_serpapi else 0,
+                max_ddg_calls=_q("ddg") if provider_settings.use_ddg else 0,
+                max_exa_calls=_q("exa") if provider_settings.use_exa else 0,
+                max_tavily_calls=_q("tavily") if provider_settings.use_tavily else 0,
+                max_serpapi_calls=_q("serpapi") if provider_settings.use_serpapi else 0,
                 max_pages_to_scrape=base_pages,
             )
-        else:  # balanced
+        else:
             budget = SearchBudget(
                 max_total_search_calls=30,
-                max_ddg_calls=_q("ddg")          if provider_settings.use_ddg     else 0,
-                max_exa_calls=_q("exa")          if provider_settings.use_exa     else 0,
-                max_tavily_calls=_q("tavily")    if provider_settings.use_tavily  else 0,
-                max_serpapi_calls=_q("serpapi")  if provider_settings.use_serpapi else 0,
+                max_ddg_calls=_q("ddg") if provider_settings.use_ddg else 0,
+                max_exa_calls=_q("exa") if provider_settings.use_exa else 0,
+                max_tavily_calls=_q("tavily") if provider_settings.use_tavily else 0,
+                max_serpapi_calls=_q("serpapi") if provider_settings.use_serpapi else 0,
                 max_pages_to_scrape=min(base_pages, 90),
             )
 
