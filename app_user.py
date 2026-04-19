@@ -783,7 +783,8 @@ if run_btn and prompt.strip():
     st.session_state["active_section"] = "results"
 
     with st.spinner("🧠 Understanding your request..."):
-        task_spec = parse_task_prompt_llm_first(prompt, llm=llm_client)
+        clean_prompt = _dedupe_repeated_prompt(user_prompt)
+        task_spec = parse_task_prompt_llm_first(clean_prompt, llm=llm_client) if llm_client else parse_task_prompt(clean_prompt)
 
     task_spec = _postprocess_task_spec_from_prompt(task_spec, prompt)
     task_spec.mode = mode
