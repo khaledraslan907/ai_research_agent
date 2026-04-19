@@ -15,6 +15,10 @@ from core.geography import (
     REGION_ALIASES,
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Entity / attribute / format hints
+# ─────────────────────────────────────────────────────────────────────────────
+
 ENTITY_HINTS = {
     "company": [
         "company", "companies", "vendor", "vendors", "firm", "firms",
@@ -160,10 +164,17 @@ NEGATIVE_GEO_CUES = [
 ]
 
 PRESENCE_ENTITY_WORDS = [
-    "office", "offices", "branch", "branches", "subsidiary", "subsidiaries",
-    "local entity", "local entities", "entity", "entities", "presence",
-    "legal entity", "legal entities", "registered entity", "registered entities",
-    "operations", "operation", "distributor", "distributors", "agent", "agents",
+    "office", "offices",
+    "branch", "branches",
+    "subsidiary", "subsidiaries",
+    "local entity", "local entities",
+    "entity", "entities",
+    "presence",
+    "legal entity", "legal entities",
+    "registered entity", "registered entities",
+    "operations", "operation",
+    "distributor", "distributors",
+    "agent", "agents",
 ]
 
 NEGATIVE_CUE_RE = re.compile(
@@ -313,18 +324,69 @@ def _extract_geo_from_negative_phrases(prompt_lower: str) -> List[str]:
     return _dedupe_keep_order(found)
 
 
+def _extract_geo_from_positive_in_phrases(prompt_lower: str) -> List[str]:
+    """
+    Catch generic positive geography lists like:
+    - software in Norway, UK, UAE, and Saudi Arabia
+    - operations in Australia, Canada, and the UK
+    - vendors in Europe, GCC, Canada, and Australia
+
+    Only scans the positive part before exclusion language begins.
+    """
+    found: List[str] = []
+
+    positive_part = re.split(
+        r"\b(?:exclude|excluding|reject|remove|avoid|except|other than|not in|not from|outside|without|no|has no|with no|do(?:es)? not have)\b",
+        prompt_lower,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+
+    for m in re.finditer(r"\bin\s+([a-zA-Z\s,\-]+)", positive_part, flags=re.IGNORECASE):
+        span = m.group(1)
+        span = re.split(
+            r"\b(?:with|that|which|who|providing|offering|suitable|return|keep|only|excluding|exclude)\b",
+            span,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip()
+
+        geo_tokens = _find_geo_tokens_in_text(span)
+        if not geo_tokens:
+            continue
+
+        for token in geo_tokens:
+            found.extend(_expand_geo_name(token))
+
+    return _dedupe_keep_order(found)
+
+
 def _extract_geography(prompt_lower: str) -> GeographyRules:
     include: List[str] = []
     exclude: List[str] = []
     exclude_presence: List[str] = []
 
     include_markers = [
-        r"search in", r"search only in", r"search within", r"look in",
-        r"companies in", r"vendors in", r"firms in", r"providers in",
-        r"software companies in", r"technology companies in", r"headquartered in",
-        r"based in", r"located in", r"from", r"within", r"inside",
-        r"in the following regions", r"in the following countries",
-        r"in the following regions only", r"in the following countries only",
+        r"search in",
+        r"search only in",
+        r"search within",
+        r"look in",
+        r"companies in",
+        r"vendors in",
+        r"firms in",
+        r"providers in",
+        r"software companies in",
+        r"technology companies in",
+        r"headquartered in",
+        r"based in",
+        r"located in",
+        r"from",
+        r"within",
+        r"inside",
+        r"in the following regions",
+        r"in the following countries",
+        r"in the following regions only",
+        r"in the following countries only",
     ]
 
     exclude_markers = [
@@ -333,21 +395,33 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
     ]
 
     presence_markers = [
-        r"operate(?:s|d|ing)? outside", r"operating outside",
-        r"work(?:s|ed|ing)? outside", r"working outside",
-        r"serv(?:e|es|ed|ing)? outside", r"serving outside",
-        r"active outside", r"present outside",
-        r"no branches in", r"without branches in",
-        r"no offices in", r"without offices in",
-        r"no presence in", r"without presence in",
-        r"do not have offices in", r"does not have offices in",
-        r"do not have branches in", r"does not have branches in",
-        r"do not have subsidiaries in", r"does not have subsidiaries in",
-        r"do not have local entities in", r"does not have local entities in",
+        r"operate(?:s|d|ing)? outside",
+        r"operating outside",
+        r"work(?:s|ed|ing)? outside",
+        r"working outside",
+        r"serv(?:e|es|ed|ing)? outside",
+        r"serving outside",
+        r"active outside",
+        r"present outside",
+        r"no branches in",
+        r"without branches in",
+        r"no offices in",
+        r"without offices in",
+        r"no presence in",
+        r"without presence in",
+        r"do not have offices in",
+        r"does not have offices in",
+        r"do not have branches in",
+        r"does not have branches in",
+        r"do not have subsidiaries in",
+        r"does not have subsidiaries in",
+        r"do not have local entities in",
+        r"does not have local entities in",
     ]
 
     exclude_presence.extend(_extract_geo_from_negative_presence_phrases(prompt_lower))
     exclude.extend(_extract_geo_from_negative_phrases(prompt_lower))
+    include.extend(_extract_geo_from_positive_in_phrases(prompt_lower))
 
     include.extend(_find_geo_after_marker(prompt_lower, include_markers, mode="include"))
     exclude.extend(_find_geo_after_marker(prompt_lower, exclude_markers, mode="exclude"))
@@ -362,8 +436,16 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
 
             if (
                 (NEGATIVE_CUE_RE.search(left) and PRESENCE_NOUN_RE.search(window))
-                or re.search(r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities)\b\s+in\s+" + re.escape(country) + r"\b", window)
-                or re.search(r"\b" + re.escape(country) + r"\b\s+(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities)\b", window)
+                or re.search(
+                    r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities)\b\s+in\s+"
+                    + re.escape(country)
+                    + r"\b",
+                    window,
+                )
+                or re.search(
+                    r"\b" + re.escape(country) + r"\b\s+(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities)\b",
+                    window,
+                )
             ):
                 exclude_presence.append(country)
                 continue
@@ -381,13 +463,19 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
         exclude = []
 
     include = [c for c in include if c not in exclude and c not in exclude_presence]
+
+    # additional protection
+    exclude_presence = [c for c in exclude_presence if c not in include]
+    exclude = [c for c in exclude if c not in include]
     exclude = [c for c in exclude if c not in exclude_presence]
+
+    strict_mode = bool(include or exclude or exclude_presence)
 
     return GeographyRules(
         include_countries=include,
         exclude_countries=exclude,
         exclude_presence_countries=exclude_presence,
-        strict_mode=bool(include or exclude or exclude_presence),
+        strict_mode=strict_mode,
     )
 
 
@@ -451,12 +539,26 @@ def _extract_target_category(prompt_lower: str) -> str:
         return "service_company"
 
     digital_patterns = [
-        r"\bdigital\b", r"\bsoftware\b", r"\bsaas\b", r"\bplatform(?:s)?\b",
-        r"\banalytics\b", r"\bautomation\b", r"\bcloud\b", r"\biot\b", r"\bscada\b",
-        r"\bapp(?:lication)?\b", r"\bdata company\b", r"\btech company\b",
-        r"\btechnology (?:provider|vendor|company|companies)\b", r"\bai company\b",
-        r"\bai companies\b", r"\bmachine learning\b", r"\bartificial intelligence\b",
-        r"\bmonitoring\b", r"\boptimization\b", r"\boptimisation\b",
+        r"\bdigital\b",
+        r"\bsoftware\b",
+        r"\bsaas\b",
+        r"\bplatform(?:s)?\b",
+        r"\banalytics\b",
+        r"\bautomation\b",
+        r"\bcloud\b",
+        r"\biot\b",
+        r"\bscada\b",
+        r"\bapp(?:application)?\b",
+        r"\bdata company\b",
+        r"\btech company\b",
+        r"\btechnology (?:provider|vendor|company|companies)\b",
+        r"\bai company\b",
+        r"\bai companies\b",
+        r"\bmachine learning\b",
+        r"\bartificial intelligence\b",
+        r"\bmonitoring\b",
+        r"\boptimization\b",
+        r"\boptimisation\b",
     ]
     if any(re.search(pat, prompt_lower) for pat in digital_patterns):
         return "software_company"
@@ -473,8 +575,9 @@ def _normalize_industry_candidate(text: str) -> str:
         set(DIGITAL_CATEGORY_HINTS) | set(SERVICE_CATEGORY_HINTS) | {
             "company", "companies", "vendor", "vendors", "provider", "providers",
             "firm", "firms", "startup", "startups", "supplier", "suppliers",
-            "technology company", "technology companies", "software company",
-            "software companies", "digital company", "digital companies",
+            "technology company", "technology companies",
+            "software company", "software companies",
+            "digital company", "digital companies",
         },
         key=len,
         reverse=True,
@@ -484,8 +587,10 @@ def _normalize_industry_candidate(text: str) -> str:
         text = re.sub(r"\b" + re.escape(phrase) + r"\b", " ", text)
 
     text = re.sub(r"\s+", " ", text).strip(" ,-")
+
     if re.search(r"\boil\b", text) and re.search(r"\bgas\b", text):
         return "oil and gas"
+
     return text
 
 
@@ -523,9 +628,9 @@ def _clean_topic_text(text: str) -> str:
         "linkedin", "website", "websites", "url", "tel", "mobile", "address",
         "operating", "operates", "headquartered", "link", "links", "title",
         "titles", "author", "authors", "doi", "journal", "year", "date",
-        "abstract", "citation", "paper", "papers", "research", "study", "studies",
-        "pdf", "csv", "excel", "xlsx", "xls", "json", "file", "files", "export",
-        "download", "output", "format", "report", "document",
+        "abstract", "citation", "paper", "papers", "research", "study",
+        "studies", "pdf", "csv", "excel", "xlsx", "xls", "json", "file",
+        "files", "export", "download", "output", "format", "report", "document",
     }
 
     words = [w for w in re.split(r"[\s,/]+", text) if w]
@@ -537,7 +642,9 @@ def _clean_topic_text(text: str) -> str:
         and w not in state_words
     ]
 
-    return _normalize_industry_candidate(" ".join(words).strip())
+    cleaned = " ".join(words).strip()
+    cleaned = _normalize_industry_candidate(cleaned)
+    return cleaned
 
 
 def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
@@ -561,7 +668,7 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
         "monitoring", "optimization", "optimisation",
         "machine", "learning", "artificial", "intelligence", "iot", "scada",
         "esp", "virtual", "flow", "metering", "well", "performance",
-        "artificial", "lift", "production", "surveillance", "multiphase",
+        "lift", "production", "surveillance", "multiphase",
         "assurance", "simulation", "modeling", "modelling", "drilling",
     }
 
@@ -643,6 +750,7 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
 
     if task_type == "document_research" and not candidate:
         return "research"
+
     return candidate or ""
 
 
