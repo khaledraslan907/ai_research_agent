@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import re
@@ -8,7 +9,6 @@ from core.geography import (
     all_country_names,
     expand_region_name,
     normalize_country_name,
-    find_countries_in_text,
     US_STATES,
     CANADIAN_PROVINCES,
     AUSTRALIAN_STATES,
@@ -56,7 +56,7 @@ ATTRIBUTE_HINTS = {
     "phone": [
         "phone", "telephone", "tel", "mobile", "contact number",
         "phone number", "contact details", "contact info",
-        "contact information", "contact",
+        "contact information",
     ],
     "linkedin": ["linkedin"],
     "hq_country": ["hq", "headquarters", "head office", "based in", "headquartered"],
@@ -101,7 +101,7 @@ GENERIC_STOPWORDS = {
     "prioritise",
 }
 
-_REQUEST_NOISE = {
+REQUEST_NOISE = {
     "link", "links", "title", "titles", "author", "authors",
     "doi", "journal", "year", "date", "abstract", "volume",
     "issue", "page", "pages", "citation", "reference", "references",
@@ -125,25 +125,35 @@ SERVICE_CATEGORY_HINTS = {
     "maintenance", "inspection", "testing", "consulting services",
 }
 
-# exact broad technical families only
 SOLUTION_KEYWORD_PATTERNS = {
+    "digital": [r"\bdigital\b", r"\bdigitalization\b", r"\bdigitization\b"],
+    "software": [r"\bsoftware\b", r"\bsaas\b", r"\bplatform(?:s)?\b", r"\bapp(?:lication)?s?\b"],
     "machine learning": [r"\bmachine learning\b", r"\bml\b"],
     "artificial intelligence": [r"\bartificial intelligence\b"],
     "ai": [r"\bai\b"],
-    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
+    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights?\b"],
     "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
     "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
     "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
+    "cloud": [r"\bcloud\b"],
     "iot": [r"\biot\b", r"\binternet of things\b"],
     "scada": [r"\bscada\b"],
     "digital twin": [r"\bdigital twin\b", r"\bdigital twins\b"],
     "predictive maintenance": [r"\bpredictive maintenance\b"],
 }
 
-# exact domain/use-case phrases
 DOMAIN_KEYWORD_PATTERNS = {
-    "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
-    "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
+    "drilling": [r"\bdrilling\b"],
+    "drilling analytics": [r"\bdrilling analytics\b"],
+    "drilling automation": [r"\bdrilling automation\b"],
+    "drilling software": [r"\bdrilling software\b"],
+    "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
+    "well construction": [r"\bwell construction\b"],
+    "directional drilling": [r"\bdirectional drilling\b"],
+    "geosteering": [r"\bgeosteering\b"],
+    "mud logging": [r"\bmud logging\b"],
+    "rig analytics": [r"\brig analytics\b"],
+    "real[- ]?time drilling": [r"\breal[- ]?time drilling\b"],
     "well performance": [r"\bwell performance\b"],
     "artificial lift": [r"\bartificial lift\b"],
     "production optimization": [r"\bproduction optimization\b", r"\bproduction optimisation\b"],
@@ -153,28 +163,48 @@ DOMAIN_KEYWORD_PATTERNS = {
     "production monitoring": [r"\bproduction monitoring\b"],
     "reservoir simulation": [r"\breservoir simulation\b"],
     "reservoir modeling": [r"\breservoir modeling\b", r"\breservoir modelling\b"],
-    "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
     "production engineering": [r"\bproduction engineering\b"],
+    "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
+    "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
 }
 
 GEO_ALIAS_MAP = {
     "uk": "united kingdom",
     "u.k.": "united kingdom",
+    "britain": "united kingdom",
+    "great britain": "united kingdom",
     "uae": "united arab emirates",
     "u.a.e.": "united arab emirates",
     "usa": "united states",
     "u.s.a.": "united states",
     "u.s.": "united states",
     "us": "united states",
+    "eu": "europe",
+    "e.u.": "europe",
 }
 
 NEGATIVE_CUE_RE = re.compile(
-    r"\b(?:exclude|excluding|reject|remove|avoid|except|other than|not in|not from|outside|without|no|has no|with no|do(?:es)? not have)\b",
+    r"\b(?:"
+    r"exclude|excluding|reject|remove|avoid|except|other than|"
+    r"not\s+(?:in|from|inside|within)|"
+    r"outside|without|"
+    r"no|has no|with no|"
+    r"do(?:es)?\s+not|don't|doesn't|"
+    r"cannot|can't"
+    r")\b",
     re.IGNORECASE,
 )
 
 PRESENCE_NOUN_RE = re.compile(
-    r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|entity|entities|operations?|legal entity|legal entities|registered entity|registered entities|distributor|distributors|agent|agents)\b",
+    r"\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|"
+    r"local entity|local entities|entity|entities|operations?|"
+    r"legal entity|legal entities|registered entity|registered entities|"
+    r"distributor|distributors|agent|agents|location|locations)\b",
+    re.IGNORECASE,
+)
+
+HQ_NOUN_RE = re.compile(
+    r"\b(?:headquarter(?:ed|s)?|hq|based|incorporated|registered in|founded in)\b",
     re.IGNORECASE,
 )
 
@@ -183,11 +213,17 @@ OUTSIDE_ACTIVITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+NEGATED_ACTIVITY_IN_RE = re.compile(
+    r"\b(?:do(?:es)?\s+not|don't|doesn't|cannot|can't|not)\s+"
+    r"(?:operate|work|serve|be\s+active|be\s+present|have)\b.*?\b(?:in|inside|within)\b",
+    re.IGNORECASE,
+)
+
 _ALL_SUBNATIONAL = {}
 _ALL_SUBNATIONAL.update(US_STATES)
 _ALL_SUBNATIONAL.update(CANADIAN_PROVINCES)
 _ALL_SUBNATIONAL.update(AUSTRALIAN_STATES)
-_ALL_REGIONS = set(REGION_ALIASES.keys())
+_ALL_REGIONS = set(REGION_ALIASES.keys()) | {"europe", "middle east", "north africa", "mena", "gcc", "cis"}
 
 
 def _normalize(text: str) -> str:
@@ -245,7 +281,7 @@ def _expand_geo_name(name: str) -> List[str]:
     if not name:
         return []
 
-    if name in GEO_ALIAS_MAP:
+    if name in GEO_ALIAS_MAP and GEO_ALIAS_MAP[name] != "europe":
         return [GEO_ALIAS_MAP[name]]
 
     expanded = expand_region_name(name)
@@ -255,6 +291,10 @@ def _expand_geo_name(name: str) -> List[str]:
     norm = normalize_country_name(name)
     if norm:
         return [norm]
+
+    # keep "europe" behavior driven by expand_region_name if available upstream
+    if name == "europe":
+        return list(expand_region_name("europe") or [])
 
     return []
 
@@ -266,7 +306,7 @@ def _find_geo_tokens_in_text(text: str) -> List[str]:
 
     found: List[str] = []
     all_geo_tokens = sorted(
-        all_country_names() + list(_ALL_REGIONS) + list(GEO_ALIAS_MAP.values()),
+        all_country_names() + list(_ALL_REGIONS) + [v for v in GEO_ALIAS_MAP.values() if v != "europe"] + ["europe"],
         key=len,
         reverse=True,
     )
@@ -285,7 +325,27 @@ def _extract_country_list_from_text(text: str) -> List[str]:
     return _dedupe_keep_order(countries)
 
 
-def _split_sentences(text: str) -> List[str]:
+def _split_geo_clauses(text: str) -> List[str]:
+    text = _normalize_geo_aliases_in_text(_normalize(text))
+
+    text = re.sub(
+        r"\b(?:and|but)\s+(?=(?:do(?:es)?\s+not|don't|doesn't|cannot|can't|"
+        r"excluding|exclude|except|without|avoid|remove|reject|other than|"
+        r"not\s+(?:in|from|inside|within))\b)",
+        ". ",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(
+        r",\s*(?=(?:do(?:es)?\s+not|don't|doesn't|cannot|can't|"
+        r"excluding|exclude|except|without|avoid|remove|reject|other than|"
+        r"not\s+(?:in|from|inside|within))\b)",
+        ". ",
+        text,
+        flags=re.IGNORECASE,
+    )
+
     parts = re.split(r"[.;:!?]\s*|\n+", text)
     return [p.strip() for p in parts if p.strip()]
 
@@ -295,7 +355,15 @@ def _is_negative_sentence(sentence: str) -> bool:
 
 
 def _is_presence_exclusion_sentence(sentence: str) -> bool:
-    return bool(PRESENCE_NOUN_RE.search(sentence) or OUTSIDE_ACTIVITY_RE.search(sentence))
+    return bool(
+        PRESENCE_NOUN_RE.search(sentence)
+        or OUTSIDE_ACTIVITY_RE.search(sentence)
+        or NEGATED_ACTIVITY_IN_RE.search(sentence)
+    )
+
+
+def _is_hq_exclusion_sentence(sentence: str) -> bool:
+    return bool(HQ_NOUN_RE.search(sentence)) and not _is_presence_exclusion_sentence(sentence)
 
 
 def _extract_geography(prompt_lower: str) -> GeographyRules:
@@ -305,53 +373,37 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
     exclude: List[str] = []
     exclude_presence: List[str] = []
 
-    sentences = _split_sentences(geo_text)
+    clauses = _split_geo_clauses(geo_text)
 
-    # Positive side: take only sentences before the first negative/exclusion sentence
-    positive_sentences: List[str] = []
-    for s in sentences:
-        if _is_negative_sentence(s):
-            break
-        positive_sentences.append(s)
-
-    positive_part = " ".join(positive_sentences).strip()
-
-    # Any geography explicitly mentioned in the positive part is treated as include geography
-    if positive_part:
-        include.extend(_extract_country_list_from_text(positive_part))
-
-    # Negative side: parse sentence by sentence so positive countries cannot leak into exclusion buckets
-    for s in sentences:
-        if not _is_negative_sentence(s):
-            continue
-
-        countries = _extract_country_list_from_text(s)
+    for clause in clauses:
+        countries = _extract_country_list_from_text(clause)
         if not countries:
             continue
 
-        if _is_presence_exclusion_sentence(s):
-            exclude_presence.extend(countries)
+        if _is_negative_sentence(clause):
+            if _is_presence_exclusion_sentence(clause):
+                exclude_presence.extend(countries)
+            elif _is_hq_exclusion_sentence(clause):
+                exclude.extend(countries)
+            else:
+                # default negative geo goes to country exclusion unless clearly presence-related
+                exclude.extend(countries)
         else:
-            exclude.extend(countries)
+            include.extend(countries)
 
     include = _dedupe_keep_order(include)
     exclude = _dedupe_keep_order(exclude)
     exclude_presence = _dedupe_keep_order(exclude_presence)
 
-    # If an included country appears in negative buckets, include wins
     exclude_presence = [c for c in exclude_presence if c not in include]
     exclude = [c for c in exclude if c not in include]
-
-    # Presence exclusion is stronger than HQ exclusion
     exclude = [c for c in exclude if c not in exclude_presence]
-
-    strict_mode = bool(include or exclude or exclude_presence)
 
     return GeographyRules(
         include_countries=include,
         exclude_countries=exclude,
         exclude_presence_countries=exclude_presence,
-        strict_mode=strict_mode,
+        strict_mode=bool(include or exclude or exclude_presence),
     )
 
 
@@ -362,7 +414,9 @@ def _extract_entity_types(prompt_lower: str) -> List[str]:
             found.append(entity_type)
 
     if "paper" in found and "person" in found:
-        explicit_person = any(w in prompt_lower for w in ["people", "researcher", "expert", "consultant", "ceo", "founder", "director"])
+        explicit_person = any(
+            w in prompt_lower for w in ["people", "researcher", "expert", "consultant", "ceo", "founder", "director"]
+        )
         if not explicit_person:
             found.remove("person")
 
@@ -411,19 +465,19 @@ def _extract_task_type(prompt_lower: str) -> str:
 
 
 def _extract_target_category(prompt_lower: str) -> str:
-    if any(x in prompt_lower for x in SERVICE_CATEGORY_HINTS):
-        return "service_company"
-
     digital_patterns = [
         r"\bdigital\b", r"\bsoftware\b", r"\bsaas\b", r"\bplatform(?:s)?\b",
         r"\banalytics\b", r"\bautomation\b", r"\bcloud\b", r"\biot\b",
-        r"\bscada\b", r"\bapp(?:application)?\b", r"\bdata company\b",
+        r"\bscada\b", r"\bapp(?:lication)?s?\b", r"\bdata company\b",
         r"\btech company\b", r"\btechnology (?:provider|vendor|company|companies)\b",
         r"\bai company\b", r"\bai companies\b", r"\bmachine learning\b",
         r"\bartificial intelligence\b", r"\bmonitoring\b", r"\boptimization\b", r"\boptimisation\b",
     ]
     if any(re.search(pat, prompt_lower) for pat in digital_patterns):
         return "software_company"
+
+    if any(x in prompt_lower for x in SERVICE_CATEGORY_HINTS):
+        return "service_company"
 
     return "general"
 
@@ -433,6 +487,8 @@ def _normalize_industry_candidate(text: str) -> str:
 
     text = re.sub(r"\boil\s*(?:&|and)?\s*gas\b", "oil and gas", text)
     text = re.sub(r"\boil\s+gas\b", "oil and gas", text)
+    text = re.sub(r"\bupstream oil and gas\b", "oil and gas", text)
+    text = re.sub(r"\bupstream\b", "oil and gas", text)
 
     removable_phrases = sorted(
         set(DIGITAL_CATEGORY_HINTS) | set(SERVICE_CATEGORY_HINTS) | {
@@ -441,6 +497,7 @@ def _normalize_industry_candidate(text: str) -> str:
             "technology company", "technology companies",
             "software company", "software companies",
             "digital company", "digital companies",
+            "drilling", "well", "rig", "service", "services",
         },
         key=len,
         reverse=True,
@@ -475,7 +532,9 @@ def _clean_topic_text(text: str) -> str:
         r"\s+(?:give|provide|show|list)\s+(?:me\s+)?(?:the\s+)?(?:link|title|author|doi|abstract)\b.*$",
         r"\s+with\s+(?:email|phone|contact|number|linkedin|website|url|tel|mobile|link|title|author)\b.*$",
         r"\s+without\s+(?:email|phone|contact|number|linkedin)\b.*$",
-        r"\s+(?:outside|excluding|except|not\s+in|not\s+from)\s+\b.*$",
+        r"\s+(?:and\s+)?(?:do(?:es)?\s+not|don't|doesn't|cannot|can't)\s+(?:operate|work|serve|have|be)\b.*$",
+        r"\s+(?:and\s+)?(?:excluding|exclude|except|avoid|without)\b.*$",
+        r"\s+(?:outside|not\s+in|not\s+from|not\s+inside|not\s+within)\s+\b.*$",
         r"\s+(?:operate|operates|operating|work|works|working|serve|serves|serving)\s+outside\s+\b.*$",
         r"\s+(?:inside|within|from)\s+\b.*$",
         r"\s+in\s+(?:europe|asia|africa|north america|south america|middle east|north africa|mena|cis|gcc|nordics|apac)\b.*$",
@@ -520,9 +579,9 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
     entity_words = {
         "companies", "company", "vendors", "vendor", "providers", "provider",
         "firms", "firm", "contractors", "contractor", "operators", "operator",
-        "suppliers", "supplier", "businesses", "business", "organizations",
-        "organization", "associations", "association", "people", "person",
-        "papers", "paper", "reports", "report", "articles", "article",
+        "suppliers", "supplier", "startups", "startup", "businesses", "business",
+        "organizations", "organization", "associations", "association", "people",
+        "person", "papers", "paper", "reports", "report", "articles", "article",
         "studies", "study", "publications", "publication",
     }
 
@@ -535,7 +594,7 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
         "machine", "learning", "artificial", "intelligence", "iot", "scada",
         "esp", "virtual", "flow", "metering", "well", "performance",
         "lift", "production", "surveillance", "multiphase",
-        "assurance", "simulation", "modeling", "modelling", "drilling",
+        "assurance", "simulation", "modeling", "modelling", "drilling", "rig",
     }
 
     def _clean(raw: str) -> str:
@@ -543,6 +602,15 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
 
     def _valid(s: str) -> bool:
         return bool(s) and len(s) > 1 and s not in entity_words
+
+    oil_gas_patterns = [
+        r"\boil\s*(?:&|and)?\s*gas\b",
+        r"\bupstream\b",
+        r"\bpetroleum\b",
+        r"\benergy\b",
+    ]
+    if any(re.search(p, prompt_lower) for p in oil_gas_patterns):
+        return "oil and gas"
 
     for pat in [
         r"working\s+in\s+(?:the\s+)?(.+?)\s+(?:industry|sector|space|field)\b",
@@ -605,7 +673,7 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
         t for t in tokens
         if t
         and t not in GENERIC_STOPWORDS
-        and t not in _REQUEST_NOISE
+        and t not in REQUEST_NOISE
         and t not in geo_words
         and t not in state_words
         and t not in entity_words
@@ -663,7 +731,8 @@ def _extract_max_results(prompt: str) -> int:
     explicit = re.findall(
         r"\b(?:top|first|at least|around|about|up to|maximum|max)?\s*(\d{1,4})\s*"
         r"(?:results?|companies|vendors|firms|records?|entries|items?|papers?)\b",
-        prompt, re.I,
+        prompt,
+        re.I,
     )
     for m in explicit:
         v = int(m)
