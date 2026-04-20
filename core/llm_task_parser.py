@@ -1,3 +1,4 @@
+
 """
 llm_task_parser.py
 ==================
@@ -7,7 +8,7 @@ Main improvements in this version:
 - Preserves digital/software-company intent even when the LLM collapses the
   topic to just "oil and gas"
 - Repairs overly broad document topics from the raw prompt
-- Treats phrasing like "operate outside Egypt and USA" as presence exclusion
+- Treats phrasing like "don't operate in Egypt and USA" as presence exclusion
 - Merges strong regex signals when the LLM output is incomplete or too generic
 - Normalizes geo aliases like UK / UAE / USA
 - Prevents LLM negative geo buckets from overriding regex positive include countries
@@ -25,20 +26,19 @@ from core.task_models import CredentialMode, GeographyRules, OutputSpec, TaskSpe
 from core.geography import normalize_country_name, expand_region_name
 
 REGION_EXPANSIONS = {
-    "europe": ["france", "germany", "united kingdom", "italy", "spain",
-               "netherlands", "belgium", "switzerland", "norway", "sweden",
-               "denmark", "finland", "poland", "austria", "czech republic",
-               "portugal", "romania", "greece", "ireland", "hungary", "ukraine", "turkey"],
-    "middle east": ["saudi arabia", "united arab emirates", "qatar", "oman",
-                    "kuwait", "bahrain", "iraq", "jordan", "lebanon", "iran"],
+    "europe": [
+        "france", "germany", "united kingdom", "italy", "spain",
+        "netherlands", "belgium", "switzerland", "norway", "sweden",
+        "denmark", "finland", "poland", "austria", "czech republic",
+        "portugal", "romania", "greece", "ireland", "hungary", "ukraine",
+        "turkey", "serbia", "croatia", "bulgaria", "slovakia", "slovenia",
+        "estonia", "latvia", "lithuania", "luxembourg", "iceland",
+    ],
+    "middle east": ["saudi arabia", "united arab emirates", "qatar", "oman", "kuwait", "bahrain", "iraq", "jordan", "lebanon", "iran"],
     "north africa": ["egypt", "libya", "algeria", "tunisia", "morocco"],
-    "mena": ["egypt", "libya", "algeria", "tunisia", "morocco",
-             "saudi arabia", "united arab emirates", "qatar", "oman",
-             "kuwait", "bahrain", "iraq", "jordan", "lebanon", "iran"],
-    "asia": ["india", "china", "japan", "south korea", "singapore",
-             "malaysia", "indonesia", "thailand", "vietnam", "philippines"],
-    "africa": ["south africa", "nigeria", "angola", "kenya", "ghana",
-               "ethiopia", "egypt", "morocco", "algeria"],
+    "mena": ["egypt", "libya", "algeria", "tunisia", "morocco", "saudi arabia", "united arab emirates", "qatar", "oman", "kuwait", "bahrain", "iraq", "jordan", "lebanon", "iran"],
+    "asia": ["india", "china", "japan", "south korea", "singapore", "malaysia", "indonesia", "thailand", "vietnam", "philippines"],
+    "africa": ["south africa", "nigeria", "angola", "kenya", "ghana", "ethiopia", "egypt", "morocco", "algeria"],
     "north america": ["united states", "canada", "mexico"],
     "south america": ["brazil", "argentina", "chile", "colombia", "peru"],
     "cis": ["russia", "kazakhstan", "azerbaijan", "ukraine"],
@@ -48,12 +48,16 @@ REGION_EXPANSIONS = {
 GEO_ALIAS_MAP = {
     "uk": "united kingdom",
     "u.k.": "united kingdom",
+    "britain": "united kingdom",
+    "great britain": "united kingdom",
     "uae": "united arab emirates",
     "u.a.e.": "united arab emirates",
     "usa": "united states",
     "u.s.a.": "united states",
     "u.s.": "united states",
     "us": "united states",
+    "eu": "europe",
+    "e.u.": "europe",
 }
 
 _GENERIC_DOC_TOPICS = {
@@ -115,6 +119,8 @@ _PRESENCE_PATTERNS = [
     r"\bserv(?:e|es|ed|ing)?\s+outside\b",
     r"\bactive\s+outside\b",
     r"\bpresent\s+outside\b",
+    r"\b(?:do(?:es)?\s+not|don't|doesn't)\s+(?:operate|work|serve|have|be\s+active|be\s+present)\b.*?\b(?:in|inside|within)\b",
+    r"\bnot\s+(?:operating|working|serving|active|present)\b.*?\b(?:in|inside|within)\b",
     r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
     r"\bwithout\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
     r"\bhas\s+no\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
@@ -165,7 +171,7 @@ def _norm_country_value(value: str) -> str:
     s = str(value or "").strip().lower()
     if not s:
         return ""
-    if s in GEO_ALIAS_MAP:
+    if s in GEO_ALIAS_MAP and GEO_ALIAS_MAP[s] != "europe":
         return GEO_ALIAS_MAP[s]
     norm = normalize_country_name(s)
     return norm or s
@@ -189,7 +195,7 @@ def _expand_countries(country_list: list[str]) -> list[str]:
         if not item_lower:
             continue
 
-        if item_lower in GEO_ALIAS_MAP:
+        if item_lower in GEO_ALIAS_MAP and GEO_ALIAS_MAP[item_lower] != "europe":
             expanded.append(GEO_ALIAS_MAP[item_lower])
             continue
 
@@ -423,7 +429,6 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     if "website" not in attributes:
         attributes = ["website"] + [a for a in attributes if a != "website"]
 
-    # preserve new fields when present in TaskSpec / prompt_templates
     solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or []) if regex_spec else []
     domain_keywords = list(getattr(regex_spec, "domain_keywords", []) or []) if regex_spec else []
     commercial_intent = getattr(regex_spec, "commercial_intent", "general") if regex_spec else "general"
@@ -481,7 +486,6 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     if not list(llm_spec.target_attributes or []):
         llm_spec.target_attributes = list(regex_spec.target_attributes or [])
 
-    # preserve parser-enriched fields from regex path
     if not list(getattr(llm_spec, "solution_keywords", []) or []):
         llm_spec.solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or [])
     if not list(getattr(llm_spec, "domain_keywords", []) or []):
