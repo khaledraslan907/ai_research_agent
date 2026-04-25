@@ -119,6 +119,18 @@ class QueryBuilder:
         domain_terms = self._domain_terms(task)
         commercial_terms = self._commercial_terms(task)
 
+        if entity_type == "tender":
+            p = 1
+            tender_focus = focus or "procurement"
+            for geo in include_countries[:6] or [""]:
+                geo_part = f" {geo}" if geo else ""
+                queries.append(SearchQuery(text=f"{tender_focus} tender{geo_part}".strip(), priority=p, family="tender")); p += 1
+                queries.append(SearchQuery(text=f"{tender_focus} procurement{geo_part}".strip(), priority=p, family="tender")); p += 1
+                queries.append(SearchQuery(text=f"{tender_focus} RFQ{geo_part}".strip(), priority=p, family="tender")); p += 1
+                queries.append(SearchQuery(text=f"{tender_focus} RFP{geo_part}".strip(), priority=p, family="tender")); p += 1
+                queries.append(SearchQuery(text=f"{tender_focus} invitation to tender{geo_part}".strip(), priority=p, family="tender")); p += 1
+            return self._deduplicate(queries)
+
         base_entity = "software company" if category == "software_company" else ("service company" if category == "service_company" else "company")
 
         p = 1
@@ -186,6 +198,17 @@ class QueryBuilder:
         solution_terms = self._solution_terms(task)
         domain_terms = self._domain_terms(task)
         commercial_terms = self._commercial_terms(task)
+
+        if (task.target_entity_types[0] if task.target_entity_types else "company").lower() == "tender":
+            geo_desc = ", ".join(include_countries[:3]) if include_countries else "target markets"
+            templates = [
+                f"tender notices and procurement opportunities for {focus} in {geo_desc}",
+                f"RFQ RFP and invitation to tender opportunities for {focus} in {geo_desc}",
+                f"buyers and procurement notices for {focus} across {geo_desc}",
+            ]
+            for i, text in enumerate(templates, start=1):
+                queries.append(SearchQuery(text=text.strip(), priority=i, family="semantic", provider_hint="exa"))
+            return self._deduplicate(queries)
 
         entity_phrase = "software and digital companies" if category == "software_company" else "companies"
         geo_desc = ", ".join(include_countries[:3]) if include_countries else "global markets"

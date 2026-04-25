@@ -8,7 +8,7 @@ User request: "{prompt}"
 Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
 {{
   "task_type": "entity_discovery" | "document_research" | "entity_enrichment" | "similar_entity_expansion" | "market_research" | "people_search",
-  "entity_type": "company" | "paper" | "person" | "organization" | "event" | "product",
+  "entity_type": "company" | "paper" | "person" | "organization" | "event" | "product" | "tender",
   "entity_category": "service_company" | "software_company" | "general",
   "topic": "<industry or subject only, e.g. oil and gas, CCS, renewable energy>",
   "solution_keywords": ["machine learning","artificial intelligence","ai","analytics","monitoring","optimization","automation","iot","scada","digital twin","predictive maintenance"],
@@ -17,7 +17,7 @@ Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
   "include_countries": ["countries to search IN, empty if none"],
   "exclude_countries": ["countries to exclude by HQ / headquarters, empty if none"],
   "exclude_presence_countries": ["countries where company must NOT have offices / branches / subsidiaries / local entities / presence"],
-  "attributes_wanted": ["website","email","phone","linkedin","summary","hq_country","presence_countries"],
+  "attributes_wanted": ["website","email","phone","linkedin","summary","hq_country","presence_countries","deadline","buyer","exhibitors"],
   "output_format": "xlsx" | "csv" | "json" | "pdf",
   "max_results": <number, default 25>,
   "confidence": <0-100>
@@ -71,6 +71,16 @@ GEOGRAPHY RULES:
 - For "Find digital oil gas companies outside USA and Egypt with email": topic = "oil and gas", entity_category = "software_company"
 - For "companies that do not have offices in Egypt or the United States": use exclude_presence_countries, NOT include_countries
 - Phrases like "no offices in", "no branches in", "no subsidiaries in", "no local entities in", "exclude Egypt presence", "exclude USA presence", "operate outside" should map to exclude_presence_countries
+
+- If the user asks for tenders, RFQs, RFPs, ITTs, bids, procurement notices, or invitations to tender, entity_type = "tender" and task_type = "market_research"
+- For "Find tenders for pipeline inspection in GCC and extract deadline and buyer":
+  - entity_type = "tender"
+  - task_type = "market_research"
+  - topic = "pipeline inspection"
+  - include_countries = GCC expansion
+  - attributes_wanted must include "deadline" and "buyer"
+- NEVER put action phrases like "extract deadline and buyer" into topic
+- NEVER classify tenders as companies unless the user explicitly asks for companies
 
 OUTPUT RULES:
 - output_format default is "xlsx" unless user says csv/json/pdf

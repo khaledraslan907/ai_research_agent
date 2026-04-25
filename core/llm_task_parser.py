@@ -386,6 +386,7 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     raw_topic = (data.get("topic") or "").strip()
     regex_topic = getattr(regex_spec, "industry", "") if regex_spec else ""
     topic = _repair_topic(raw_prompt, raw_topic, task_type, regex_topic=regex_topic)
+    topic = re.sub(r"\bextract\s+(?:deadline|buyer)(?:\s+and\s+(?:deadline|buyer))?\b", "", topic, flags=re.IGNORECASE).strip(" ,.-")
 
     include_raw = data.get("include_countries", []) or []
     exclude_raw = data.get("exclude_countries", []) or []
@@ -401,7 +402,13 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
 
     prompt_lower = _norm_spaces(raw_prompt).lower()
     if task_type in {"entity_discovery", "entity_enrichment", "similar_entity_expansion", "market_research"}:
-        if any(hint in prompt_lower for hint in _SERVICE_HINTS):
+        if re.search(r"\b(tender|tenders|rfq|rfp|itt|itb|bid|bids|procurement|procurements|invitation to tender)\b", prompt_lower):
+            entity_type = "tender"
+            task_type = "market_research"
+            entity_category = "general"
+            if not topic:
+                topic = "procurement"
+        elif any(hint in prompt_lower for hint in _SERVICE_HINTS):
             entity_category = "service_company"
         elif any(hint in prompt_lower for hint in _DIGITAL_HINTS):
             entity_category = "software_company"
@@ -424,6 +431,7 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
     valid_attrs = {
         "website", "email", "phone", "linkedin", "summary", "hq_country",
         "presence_countries", "pdf", "author", "authors", "doi", "abstract",
+        "deadline", "buyer", "exhibitors",
     }
     attributes = [a for a in attrs_raw if a in valid_attrs]
     if not attributes and regex_spec:
@@ -490,8 +498,16 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     if llm_spec.task_type == "entity_discovery" and regex_spec.task_type in {"document_research", "people_search", "market_research"}:
         llm_spec.task_type = regex_spec.task_type
 
+    if (llm_spec.target_entity_types or ["company"]) == ["company"] and (regex_spec.target_entity_types or ["company"]) == ["tender"]:
+        llm_spec.target_entity_types = ["tender"]
+        llm_spec.task_type = "market_research"
+        llm_spec.target_category = "general"
+
     if not list(llm_spec.target_attributes or []):
         llm_spec.target_attributes = list(regex_spec.target_attributes or [])
+    for attr in ["deadline", "buyer", "exhibitors"]:
+        if attr in (regex_spec.target_attributes or []) and attr not in (llm_spec.target_attributes or []):
+            llm_spec.target_attributes.append(attr)
 
     if not list(getattr(llm_spec, "solution_keywords", []) or []):
         llm_spec.solution_keywords = list(getattr(regex_spec, "solution_keywords", []) or [])
