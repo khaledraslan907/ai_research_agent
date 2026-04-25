@@ -11,10 +11,10 @@ Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
   "entity_type": "company" | "paper" | "person" | "organization" | "event" | "product",
   "entity_category": "service_company" | "software_company" | "general",
   "topic": "<industry or subject only, e.g. oil and gas, CCS, renewable energy>",
-  "solution_keywords": ["machine learning","artificial intelligence","ai","analytics","monitoring","optimization","automation","iot","scada","digital twin","predictive maintenance"],
-  "domain_keywords": ["esp","virtual flow metering","well performance","artificial lift","production optimization","well surveillance","multiphase metering","flow assurance","production monitoring","reservoir simulation","reservoir modeling","drilling optimization","production engineering"],
+  "solution_keywords": ["technical phrases explicitly present in the request"],
+  "domain_keywords": ["domain or equipment phrases explicitly present in the request"],
   "commercial_intent": "general" | "agent_or_distributor" | "reseller" | "partner",
-  "include_countries": ["countries to search IN, empty if none"],
+  "include_countries": ["countries or regions to search IN, empty if none"],
   "exclude_countries": ["countries to exclude by HQ / headquarters, empty if none"],
   "exclude_presence_countries": ["countries where company must NOT have offices / branches / subsidiaries / local entities / presence"],
   "attributes_wanted": ["website","email","phone","linkedin","summary","hq_country","presence_countries"],
@@ -24,26 +24,24 @@ Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
 }}
 
 RULES:
-- topic = INDUSTRY or SUBJECT ONLY
+- topic = industry or subject only
 - NEVER put country names in topic
 - NEVER put contact/output words in topic
 - entity_category = "software_company" for digital/software/AI/analytics/automation/platform/SaaS vendors
+- entity_category = "service_company" for contractors, service companies, engineering firms, inspection, maintenance, wireline, logging, intervention, fabrication, rental, chemicals, offshore services, manpower, or field services
+- Parse both English and Arabic requests
+- If the request is Arabic, still return normalized English field values in the JSON
+- Countries may be written in Arabic; normalize them to English canonical names
+- Preserve niche phrases when the request is more specific than the broad industry
 
 CRITICAL RULES FOR solution_keywords:
-- solution_keywords must contain ONLY technical phrases EXPLICITLY WRITTEN in the user's request
+- solution_keywords must contain ONLY technical phrases explicitly written by the user
 - DO NOT infer related keywords not mentioned by the user
 - DO NOT expand one keyword into a broader taxonomy
-- If the user says "machine learning", return "machine learning"
-- If the user says "AI", return "ai"
-- If the user says "artificial intelligence", return "artificial intelligence"
-- If the user says both "machine learning" and "AI", return both
-- Do NOT add analytics, monitoring, optimization, automation, IoT, SCADA, digital twin, or predictive maintenance unless they are explicitly present in the request
 
 CRITICAL RULES FOR domain_keywords:
 - domain_keywords must capture domain-specific product/use-case phrases explicitly written by the user
-- Keep equipment names and niche oil-and-gas phrases here
-- Examples: ESP, virtual flow metering, well performance, artificial lift
-- Do NOT force these into topic if the broad industry is already clear
+- Keep equipment names, service lines, and niche phrases here
 - Do NOT infer domain_keywords that the user did not explicitly mention
 
 COMMERCIAL INTENT RULES:
@@ -52,11 +50,10 @@ COMMERCIAL INTENT RULES:
 - commercial_intent = "partner" for partner/channel-partner intent
 
 GEOGRAPHY RULES:
-- For "Find service companies in Egypt working in oil and gas": topic = "oil and gas", include_countries = ["egypt"]
-- For "Find papers about CCS in Europe": topic = "CCS", task_type = "document_research"
-- For "Find digital oil gas companies outside USA and Egypt with email": topic = "oil and gas", entity_category = "software_company"
-- For "companies that do not have offices in Egypt or the United States": use exclude_presence_countries, NOT include_countries
-- Phrases like "no offices in", "no branches in", "no subsidiaries in", "no local entities in", "exclude Egypt presence", "exclude USA presence", "operate outside" should map to exclude_presence_countries
+- If the user says "in Egypt", use include_countries=["egypt"]
+- If the user says "outside Egypt" or "no offices in Egypt", use exclude_presence_countries=["egypt"]
+- "operate outside", "no offices in", "no branches in", "no subsidiaries in", "no local entities in", "exclude Egypt presence", "exclude USA presence" should map to exclude_presence_countries
+- If user names a region, keep it as include_countries region text and let the parser expand it later when needed
 
 OUTPUT RULES:
 - output_format default is "xlsx" unless user says csv/json/pdf
@@ -88,24 +85,25 @@ Generate search queries. Return ONLY this JSON:
 }}
 
 RULES:
-- DDG: keyword style, 3-8 words, avoid long sentences
+- DDG: keyword style, 3-10 words, avoid long sentences
 - Exa: full natural-language ideal-result descriptions
 - Tavily: questions or short natural phrases
 - SerpApi: Google-style precise search strings
 - NEVER repeat the same query across providers
-- Each provider should take DIFFERENT angles
+- Each provider should take different angles
 - Use solution_keywords explicitly when provided
 - Use domain_keywords explicitly when provided
 - If commercial_intent is agent_or_distributor / reseller / partner, include queries about distributors, resellers, representatives, channel partners, partner programs
-- If include_countries is "any", DO NOT invent one specific country
+- If include_countries is "any", do not invent one specific country
 - If include_countries lists countries/regions, use them naturally in some queries
-- If exclude_presence_countries exists, bias toward companies operating in Europe / GCC / Canada / Australia / Asia-Pacific and avoid phrasing that centers excluded countries
-- For paper/document searches: include academic/site/pdf variations
-- Prefer real company / vendor queries, not news, rankings, jobs, or directories
+- If the market is Arabic-speaking or the request is Arabic, include at least one Arabic query in DDG and optionally SerpApi
+- For paper/document searches: include academic / site / pdf / DOI / publisher variations
+- For people searches: bias toward profile or team-page style queries
+- Prefer real company / vendor / research / profile queries, not news, rankings, jobs, or directories
 """
 
 
-RERANK_PROMPT = """You are a precise B2B research analyst. Score these search results for relevance.
+RERANK_PROMPT = """You are a precise research analyst. Score these search results for relevance.
 
 User wanted: {user_request}
 Topic: {topic}
@@ -137,26 +135,27 @@ GEO_VERIFY_PROMPT = """You are a corporate intelligence analyst.
 Company: {company_name}
 Website: {website}
 Description: {description}
-Page text (first 800 chars): {page_text}
+Page text (first 1200 chars): {page_text}
 
-Determine where this company is headquartered. Return ONLY this JSON:
+Determine where this company is headquartered and where it has actual presence. Return ONLY this JSON:
 {{
   "hq_country": "<lowercase country name or empty string>",
   "confidence": <0-100>,
   "evidence": "<short evidence>",
   "has_usa_presence": <true/false>,
-  "has_egypt_presence": <true/false>
+  "has_egypt_presence": <true/false>,
+  "presence_countries": ["countries with explicit office/branch/subsidiary/local-presence evidence"]
 }}
 
 RULES:
 - hq_country = where the COMPANY itself is based
 - serving clients in a country does NOT mean HQ there
-- only set presence flags true if there is explicit office/branch/subsidiary/local-entity evidence
+- only set presence fields true if there is explicit office/branch/subsidiary/local-entity evidence
 - if confidence < 40, return empty hq_country
 """
 
 
-PAGE_CLASSIFY_PROMPT = """Classify this web page for B2B research.
+PAGE_CLASSIFY_PROMPT = """Classify this web page for research.
 
 Sector: {sector}
 Title: {title}
@@ -165,7 +164,7 @@ Text (first 3000 chars): {text}
 
 Return ONLY this JSON:
 {{
-  "page_type": "company" | "directory" | "blog" | "media" | "irrelevant" | "unknown",
+  "page_type": "company" | "directory" | "blog" | "media" | "document" | "irrelevant" | "unknown",
   "is_relevant": true/false,
   "confidence": 0-100,
   "reason": "one sentence"
@@ -173,10 +172,11 @@ Return ONLY this JSON:
 
 RULES:
 - page_type="company" ONLY if this is a real company's own website
-- page_type="directory" if it lists multiple companies
+- page_type="directory" if it lists multiple companies or contacts
 - page_type="media" if it is news / magazine / press release
 - page_type="blog" if opinion / tutorial / personal blog
-- is_relevant=true ONLY for actual companies/vendors in the sector
+- page_type="document" if it is a PDF/report/brochure/resource page with useful entity evidence
+- is_relevant=true ONLY for actual entities/vendors/documents in the sector
 """
 
 
