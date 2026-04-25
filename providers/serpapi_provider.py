@@ -12,9 +12,11 @@ from providers.base import BaseSearchProvider
 class SerpApiProvider(BaseSearchProvider):
     name = "serpapi"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, hl: str = "en", google_domain: str = "google.com"):
         from core.config import SERPAPI_KEY
         self.api_key = (api_key or SERPAPI_KEY or "").strip()
+        self.hl = hl
+        self.google_domain = google_domain
 
     def set_api_key(self, api_key: Optional[str]):
         self.api_key = (api_key or "").strip()
@@ -25,7 +27,6 @@ class SerpApiProvider(BaseSearchProvider):
     def search(self, query: str, max_results: int = 5) -> List[SearchResult]:
         if not self.is_available():
             return []
-
         try:
             response = requests.get(
                 "https://serpapi.com/search.json",
@@ -34,6 +35,8 @@ class SerpApiProvider(BaseSearchProvider):
                     "q": query,
                     "api_key": self.api_key,
                     "num": max_results,
+                    "hl": self.hl,
+                    "google_domain": self.google_domain,
                 },
                 timeout=30,
             )
@@ -44,15 +47,12 @@ class SerpApiProvider(BaseSearchProvider):
 
         items = data.get("organic_results", []) if isinstance(data, dict) else []
         results: List[SearchResult] = []
-
         for idx, item in enumerate(items, start=1):
-            url     = item.get("link", "") or ""
-            title   = item.get("title", "") or ""
-            snippet = item.get("snippet", "") or ""
-
+            url = item.get("link", "") or ""
+            title = item.get("title", "") or ""
+            snippet = item.get("snippet", "") or item.get("rich_snippet", "") or ""
             if not url:
                 continue
-
             norm = normalize_url(url)
             results.append(SearchResult(
                 provider=self.name,
@@ -63,6 +63,6 @@ class SerpApiProvider(BaseSearchProvider):
                 domain=extract_domain(norm),
                 rank=idx,
                 raw=item,
+                source_type="web",
             ))
-
         return results
