@@ -311,17 +311,15 @@ def _humanize_task_type(task_type: str) -> str:
     }.get(task_type, "🔍 Entities")
 
 
-
-
 def _humanize_entity_type(entity_type: str) -> str:
     return {
         "company": "🏢 Companies",
         "paper": "📄 Papers",
         "person": "👥 People",
+        "tender": "📑 Tenders",
         "event": "🎪 Events",
         "product": "🧰 Products",
-        "tender": "📑 Tenders",
-    }.get((entity_type or "").strip(), "🔍 Entities")
+    }.get((entity_type or "company").strip(), "🔍 Entities")
 
 
 def _humanize_target_category(category: str) -> str:
@@ -345,12 +343,6 @@ _DIGITAL_CATEGORY_HINTS = (
     "digital", "software", "saas", "platform", "analytics", "automation",
     "ai", "artificial intelligence", "machine learning", "data", "iot",
     "scada", "cloud", "tech company", "technology company", "technology vendor",
-)
-_SERVICE_CATEGORY_HINTS = (
-    "service company", "service companies", "oilfield service", "oilfield services",
-    "petroleum service", "petroleum services", "contractor", "contractors",
-    "engineering services", "wireline", "slickline", "well logging",
-    "شركات خدمات البترول", "خدمات البترول", "خدمات النفط", "خدمات الغاز",
 )
 
 
@@ -492,9 +484,7 @@ def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
     if getattr(task_spec, "task_type", "") in {
         "entity_discovery", "market_research", "similar_entity_expansion", "entity_enrichment"
     }:
-        if any(hint in prompt_lower for hint in _SERVICE_CATEGORY_HINTS):
-            task_spec.target_category = "service_company"
-        elif any(hint in prompt_lower for hint in _DIGITAL_CATEGORY_HINTS):
+        if any(hint in prompt_lower for hint in _DIGITAL_CATEGORY_HINTS):
             task_spec.target_category = "software_company"
 
     if not list(getattr(task_spec, "solution_keywords", []) or []):
@@ -519,31 +509,10 @@ def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
             or list(getattr(geo, "exclude_presence_countries", []) or [])
         )
 
-    bad_generic_keywords = {
-        "oilfield service companies", "service companies", "company", "companies",
-        "vendors", "providers", "oilfield service", "software companies", "digital companies"
-    }
-    task_spec.solution_keywords = [k for k in list(getattr(task_spec, "solution_keywords", []) or []) if _normalize_prompt_text(k) not in bad_generic_keywords]
-    task_spec.domain_keywords = [k for k in list(getattr(task_spec, "domain_keywords", []) or []) if _normalize_prompt_text(k) not in bad_generic_keywords]
-
-    # Arabic fallback for Egypt service prompts if upstream parser misses geography/topic
-    if any(x in prompt for x in ["مصر", "شركات خدمات البترول", "خدمات البترول", "خدمات النفط", "النفط والغاز"]):
-        if not list(getattr(task_spec.geography, "include_countries", []) or []):
-            task_spec.geography.include_countries = ["egypt"]
-            task_spec.geography.strict_mode = True
-        if getattr(task_spec, "target_category", "general") == "general":
-            task_spec.target_category = "service_company"
-        if not _clean_text(getattr(task_spec, "industry", "")):
-            task_spec.industry = "oil and gas"
-
     industry = _clean_text(getattr(task_spec, "industry", ""))
     domain_keywords = list(getattr(task_spec, "domain_keywords", []) or [])
-    if domain_keywords and (not industry or industry.lower() in {"oil and gas", "oil & gas", "energy", "petroleum", "general"}):
+    if domain_keywords and (not industry or industry.lower() in {"oil and gas", "oil & gas", "energy", "petroleum"}):
         task_spec.industry = f"{', '.join(domain_keywords[:4])} in oil and gas"
-    elif (not industry or industry.lower() == "general") and (
-        "oilfield service" in prompt_lower or "petroleum service" in prompt_lower or "oil and gas" in prompt_lower or "خدمات البترول" in prompt or "النفط والغاز" in prompt
-    ):
-        task_spec.industry = "oil and gas"
 
     return task_spec
 
@@ -1028,26 +997,18 @@ if run_btn and prompt.strip():
 
     base_attrs = list(dict.fromkeys(list(getattr(task_spec, "target_attributes", []) or [])))
 
-    entity_type = (getattr(task_spec, "target_entity_types", []) or ["company"])[0]
-
-    if entity_type == "tender" or task_spec.task_type == "market_research":
-        tender_defaults = ["website", "deadline", "buyer"]
-        task_spec.target_attributes = list(dict.fromkeys(base_attrs + user_fields + tender_defaults))
-    elif task_spec.task_type == "document_research":
+    entity_type = (getattr(task_spec, "target_entity_types", ["company"]) or ["company"])[0]
+    if task_spec.task_type == "document_research":
         task_spec.target_attributes = sorted(set([
             "website", "summary", "author", "authors", "year",
             "publication_year", "published_date", "abstract"
         ] + user_fields + base_attrs))
     elif task_spec.task_type == "people_search":
         task_spec.target_attributes = list(dict.fromkeys(["linkedin", "website"] + user_fields + base_attrs))
+    elif entity_type == "tender":
+        task_spec.target_attributes = list(dict.fromkeys(base_attrs + (["website"] if not user_fields else []) + user_fields))
     else:
-        default_attrs = user_fields or ["website", "email", "phone"]
-        geo_support_attrs = []
-        if getattr(task_spec.geography, "strict_mode", False):
-            geo_support_attrs.extend(["hq_country", "presence_countries", "summary"])
-        elif getattr(task_spec, "domain_keywords", None) or getattr(task_spec, "solution_keywords", None):
-            geo_support_attrs.append("summary")
-        task_spec.target_attributes = list(dict.fromkeys(base_attrs + default_attrs + geo_support_attrs))
+        task_spec.target_attributes = list(dict.fromkeys(base_attrs + (["website"] if not user_fields else []) + user_fields))
 
     if not task_spec.industry or len(task_spec.industry.strip()) < 2:
         st.error(
@@ -1059,8 +1020,7 @@ if run_btn and prompt.strip():
     geo = task_spec.geography
     with st.container():
         c1, c2, c3, c4 = st.columns(4)
-        display_entity = _humanize_entity_type((getattr(task_spec, "target_entity_types", []) or ["company"])[0])
-        c1.info(f"**Looking for:** {display_entity}")
+        c1.info(f"**Looking for:** {_humanize_entity_type((getattr(task_spec, 'target_entity_types', ['company']) or ['company'])[0])}")
         c2.info(f"**Category:** {_humanize_target_category(getattr(task_spec, 'target_category', 'general'))}")
         c3.info(f"**Industry:** {task_spec.industry}")
         c4.info(f"**Target:** {max_results} results in {mode} mode")
