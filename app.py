@@ -1,17 +1,47 @@
+"""
+app_user.py — AI Research Agent (updated)
+========================================
+
+Main fixes in this version:
+- Preserves and displays company category clearly
+- Preserves and displays solution keywords, domain keywords, and commercial intent
+- Fixes prompt parsing call (uses prompt instead of undefined user_prompt)
+- Saves domain keywords into task_meta so they appear in Search Details
+- Keeps app-layer postprocessing minimal and aligned with backend parser
+"""
+
 from __future__ import annotations
 
-from pathlib import Path
+import io
+import os
+import re
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
 
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
-from core.models import ProviderSettings, CompanyRecord
-from core.keyword_expander import expand_keywords, build_expanded_queries
+from core.models import CompanyRecord, ProviderSettings
+
+try:
+    from core.paper_summarizer import (
+        summarize_papers,
+        summaries_to_pdf_bytes,
+        summaries_to_text,
+    )
+except Exception:
+    from core.paper_summarizer import summarize_papers, summaries_to_text
+
+    def summaries_to_pdf_bytes(summaries, topic):
+        return None
+
 from pipeline.orchestrator import SearchOrchestrator
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Page setup
+# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Research Agent",
     page_icon="🔍",
@@ -19,883 +49,1365 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Mode presets — changing mode auto-fills all provider checkboxes + budget sliders
-# Numbers are intentionally larger than before to return more results
-# ─────────────────────────────────────────────────────────────────────────────
-MODE_PRESETS = {
-    "Fast": {
-        "description": "DDG only · no LLM re-ranking · ~10–20 sec · quick check. Max ~20 results.",
-        "providers": {"ddg": True,  "exa": False, "tavily": False, "serpapi": False, "firecrawl": False},
-        "budget":    {"total": 10,  "ddg": 4, "exa": 0, "tavily": 0, "serpapi": 0, "pages": 30},
+for key, default in {
+    "search_result": None,
+    "task_meta": None,
+    "paper_summaries": [],
+    "summaries_topic": "",
+    "prompt_value": "",
+    "active_section": "results",
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+.stApp { background: #0f1117; color: #e8eaf0; }
+h1, h2, h3 { font-family: 'IBM Plex Mono', monospace; letter-spacing: -0.02em; }
+.result-card {
+    background: #1a1d27; border: 1px solid #2d3148; border-radius: 10px;
+    padding: 18px 22px; margin-bottom: 12px;
+}
+.result-card:hover { border-color: #4f6ef7; }
+.result-name {
+    font-family: 'IBM Plex Mono', monospace; font-size: 15px; font-weight: 600;
+    color: #ffffff; margin-bottom: 4px;
+}
+.result-meta { font-size: 13px; color: #7b8099; margin-bottom: 6px; }
+.result-link { font-size: 13px; color: #4f6ef7; text-decoration: none; }
+.tag {
+    display: inline-block; background: #1e2236; border: 1px solid #363d5c;
+    border-radius: 4px; padding: 2px 8px; font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace; color: #8892b0; margin-right: 6px;
+}
+.key-step {
+    background: #151823; border-left: 3px solid #4f6ef7;
+    border-radius: 0 8px 8px 0; padding: 12px 16px; margin: 8px 0; font-size: 13px;
+}
+.key-step a { color: #4f6ef7; }
+.section-header {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: #4f6ef7; margin: 20px 0 8px 0;
+    padding-bottom: 6px; border-bottom: 1px solid #2d3148;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def _secret(key: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(key, "") or os.getenv(key, default)
+    except Exception:
+        return os.getenv(key, default)
+
+
+KEY_GUIDE = {
+    "groq": {
+        "label": "Groq API Key",
+        "icon": "⚡",
+        "cost": "100% Free · 14,400 requests/day",
+        "steps": [
+            ("Go to", "https://console.groq.com", "console.groq.com"),
+            ("Click", None, '"Sign Up" (free, no credit card)'),
+            ("Click", None, '"API Keys" → "Create API Key"'),
+            ("Copy", None, "the key starting with gsk_... and paste above"),
+        ],
+        "why": "Powers smart query planning and result ranking. Most important key.",
     },
-    "Balanced": {
-        "description": "DDG + Exa + Tavily · LLM re-ranking · ~1–2 min · recommended. Up to ~60 results.",
-        "providers": {"ddg": True,  "exa": True,  "tavily": True,  "serpapi": False, "firecrawl": False},
-        "budget":    {"total": 30,  "ddg": 7, "exa": 5, "tavily": 4, "serpapi": 0, "pages": 90},
+    "gemini": {
+        "label": "Google Gemini Key",
+        "icon": "🧠",
+        "cost": "Free · 1,500 requests/day",
+        "steps": [
+            ("Go to", "https://aistudio.google.com", "aistudio.google.com"),
+            ("Click", None, '"Get API Key" → "Create API Key"'),
+            ("Copy", None, "the key starting with AIza... and paste above"),
+        ],
+        "why": "Backup LLM — used when Groq quota is exhausted.",
     },
-    "Deep": {
-        "description": "All providers · max diversity · ~3–8 min · maximum results. Up to 150+ results.",
-        "providers": {"ddg": True,  "exa": True,  "tavily": True,  "serpapi": True,  "firecrawl": True},
-        "budget":    {"total": 60,  "ddg": 12, "exa": 8, "tavily": 6, "serpapi": 4, "pages": 300},
+    "exa": {
+        "label": "Exa API Key",
+        "icon": "🔭",
+        "cost": "Free · 1,000 searches/month",
+        "steps": [
+            ("Go to", "https://exa.ai", "exa.ai"),
+            ("Click", None, '"Sign Up" → confirm email'),
+            ("Go to", None, 'Dashboard → "API Keys" → "New Key"'),
+            ("Copy", None, "the key and paste above"),
+        ],
+        "why": "Best semantic search — finds things DDG misses. Needed for LinkedIn people search.",
+    },
+    "tavily": {
+        "label": "Tavily API Key",
+        "icon": "🌐",
+        "cost": "Free · 1,000 searches/month",
+        "steps": [
+            ("Go to", "https://tavily.com", "tavily.com"),
+            ("Click", None, '"Get Started Free"'),
+            ("Copy", None, "your API key from the dashboard"),
+        ],
+        "why": "Adds question-style search diversity. Helps reach higher result counts.",
+    },
+    "serpapi": {
+        "label": "SerpApi Key",
+        "icon": "🎯",
+        "cost": "Free · 100 searches/month",
+        "steps": [
+            ("Go to", "https://serpapi.com", "serpapi.com"),
+            ("Click", None, '"Register" (free plan available)'),
+            ("Copy", None, "your API key from the dashboard"),
+        ],
+        "why": "Best for LinkedIn people search via site:linkedin.com queries.",
     },
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+MODE_PRESETS = {
+    "🚀 Fast": {"mode": "Fast", "max": 15, "desc": "~15 sec · DDG only · quick check"},
+    "⚖️ Balanced": {"mode": "Balanced", "max": 40, "desc": "~1–2 min · best quality/speed ratio · recommended"},
+    "🔬 Deep": {"mode": "Deep", "max": 100, "desc": "~5–10 min · all providers · maximum results"},
+}
 
-def _read_uploaded_file(file) -> pd.DataFrame | None:
+EXAMPLES = [
+    ("🏢 Companies", "Find oilfield service companies in Egypt and Saudi Arabia with email and phone"),
+    ("🏢 Companies", "Find digital oil and gas software companies outside USA and Egypt with email"),
+    ("🏢 Companies", "Find renewable energy companies in Germany and Norway with contact details"),
+    ("🏢 Companies", "Find AI and data analytics companies in the energy sector outside USA"),
+    ("📄 Papers", "Find research papers about Electrical Submersible Pump with authors export as PDF"),
+    ("📄 Papers", "Find papers about asphaltene effect on ESP performance with authors as PDF"),
+    ("📄 Papers", "Find papers about carbon capture CCS techniques export as CSV"),
+    ("👥 LinkedIn", "Find LinkedIn profiles of petroleum engineers in oil gas companies in Egypt"),
+    ("👥 LinkedIn", "Find HR managers and engineers on LinkedIn working in oilfield service companies in Saudi Arabia"),
+]
+
+
+def _show_key_guide(key_id: str):
+    g = KEY_GUIDE[key_id]
+    st.markdown(f"**{g['icon']} {g['label']}** — {g['cost']}")
+    for action, url, text in g["steps"]:
+        link = f'<a href="{url}" target="_blank">{text}</a>' if url else text
+        st.markdown(f'<div class="key-step">→ {action} {link}</div>', unsafe_allow_html=True)
+    st.caption(f"💡 {g['why']}")
+
+
+def _read_file(file) -> pd.DataFrame | None:
     if file is None:
         return None
     try:
-        if file.name.lower().endswith(".csv"):
-            return pd.read_csv(file)
-        if file.name.lower().endswith(".xlsx"):
-            return pd.read_excel(file)
-    except Exception as e:
-        st.error(f"Failed to read file: {e}")
-    return None
+        return pd.read_csv(file) if file.name.lower().endswith(".csv") else pd.read_excel(file)
+    except Exception:
+        return None
 
 
-def _normalize_filename(filename: str, fmt: str) -> str:
-    filename = (filename or "results").strip()
-    ext_map  = {"xlsx": ".xlsx", "csv": ".csv", "json": ".json", "pdf": ".pdf"}
-    ext = ext_map.get(fmt, ".xlsx")
-    return filename if filename.lower().endswith(ext) else filename + ext
+def _normalize_filename(name: str, fmt: str | None) -> str:
+    ext_map = {"xlsx": ".xlsx", "csv": ".csv", "pdf": ".pdf", "json": ".json", None: ".xlsx"}
+    desired_ext = ext_map.get(fmt, ".xlsx")
+    name = (name or "results").strip()
+    for ext in [".xlsx", ".csv", ".pdf", ".json"]:
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return name + desired_ext
 
 
-def _show_task_banner(task_spec: dict):
-    geo  = task_spec.get("geography", {}) or {}
-    inc  = geo.get("include_countries", []) or []
-    exc  = geo.get("exclude_countries", []) or []
-    excp = geo.get("exclude_presence_countries", []) or []
-
-    TYPE_LABELS = {
-        "entity_discovery":         "🔍 Find companies / entities",
-        "document_research":        "📄 Find papers / documents",
-        "entity_enrichment":        "✏️ Enrich existing list",
-        "similar_entity_expansion": "🔁 Find similar entities",
-        "market_research":          "📊 Market research",
-    }
-    CAT_LABELS = {
-        "service_company":  "⚙️ Service company",
-        "software_company": "💻 Software / digital company",
-        "general":          "🏢 General entity",
-    }
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Task",     TYPE_LABELS.get(task_spec.get("task_type",""), task_spec.get("task_type","")))
-    c2.metric("Topic",    task_spec.get("industry", "—") or "—")
-    c3.metric("Max",      f"{task_spec.get('max_results', 25)} results")
-
-    c4, c5 = st.columns(2)
-    c4.metric("Category", CAT_LABELS.get(task_spec.get("target_category",""), "—"))
-    c5.metric("Collecting", ", ".join(task_spec.get("target_attributes") or ["website"]))
-
-    if inc:  st.info(f"🌍 Search IN: {', '.join(c.title() for c in inc)}")
-    if exc:  st.warning(f"🚫 Exclude HQ in: {', '.join(c.title() for c in exc)}")
-    if excp: st.warning(f"🚫 Exclude presence in: {', '.join(c.title() for c in excp)}")
-    if not inc and not exc and not excp:
-        st.caption("🌐 No geography filter — searching globally")
+def _mask(key: str) -> str:
+    if not key or len(key) < 8:
+        return ""
+    return key[:4] + "•" * (len(key) - 8) + key[-4:]
 
 
-def _paper_attr(paper, *names: str) -> str:
-    for name in names:
-        try:
-            value = getattr(paper, name, "")
-        except Exception:
-            value = ""
-        if value is not None and str(value).strip() and str(value).strip().lower() != "nan":
-            return str(value)
+def _is_blank(value) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    s = str(value).strip()
+    return s == "" or s.lower() in {"nan", "none", "null"}
+
+
+def _clean_text(value) -> str:
+    return "" if _is_blank(value) else str(value).strip()
+
+
+def _normalize_prompt_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _dedupe_repeated_prompt(prompt: str) -> str:
+    raw = (prompt or "").strip()
+    if not raw:
+        return raw
+
+    half = len(raw) // 2
+    left = raw[:half].strip()
+    right = raw[half:].strip()
+
+    if left and right and left == right:
+        return left
+
+    if len(raw) > 40:
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+        deduped = []
+        prev = None
+        for s in sentences:
+            if prev is not None and s == prev:
+                continue
+            deduped.append(s)
+            prev = s
+        return " ".join(deduped)
+
+    return raw
+
+
+def _first_nonempty(record: dict, keys: list[str]) -> str:
+    for key in keys:
+        if key in record and not _is_blank(record.get(key)):
+            return _clean_text(record.get(key))
     return ""
 
 
-def _paper_rows_for_display(papers: list[CompanyRecord], source_rows: list[dict] | None = None) -> pd.DataFrame:
-    rows = []
-    source_rows = source_rows or []
-    for idx, paper in enumerate(papers):
-        src = source_rows[idx] if idx < len(source_rows) else {}
-        rows.append({
-            "Title": _paper_attr(paper, "company_name", "title"),
-            "Authors": _paper_attr(paper, "authors"),
-            "Year": _paper_attr(paper, "publication_year", "year"),
-            "DOI": _paper_attr(paper, "doi"),
-            "URL": _paper_attr(paper, "website", "source_url"),
-            "AI Summary": _paper_attr(paper, "notes"),
-            "Abstract": _paper_attr(paper, "description", "abstract", "summary"),
-            "Confidence": src.get("confidence_score", ""),
-            "Source Provider": src.get("source_provider", ""),
-        })
-    return pd.DataFrame(rows)
-
-
-def _file_bytes(path_str: str) -> bytes | None:
-    if not path_str:
-        return None
+def _parse_year(value) -> str:
+    if _is_blank(value):
+        return ""
+    s = str(value).strip()
     try:
-        path = Path(path_str)
-        if path.exists() and path.is_file():
-            return path.read_bytes()
+        f = float(s)
+        if 1900 <= int(f) <= 2100:
+            return str(int(f))
     except Exception:
-        return None
-    return None
+        pass
+    m = re.search(r"\b(19|20)\d{2}\b", s)
+    return m.group(0) if m else ""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sidebar
-# ─────────────────────────────────────────────────────────────────────────────
-with st.sidebar:
-
-    # 1 — FREE LLM KEYS ───────────────────────────────────────────────────────
-    st.header("🆓 Free LLM Keys")
-    st.caption("No credit card needed. Add at least one for smart search + re-ranking.")
-    with st.expander("🔑 Add free LLM keys", expanded=True):
-        groq_key = st.text_input(
-            "Groq API Key", value="", type="password",
-            help="FREE · 14 400 req/day · console.groq.com (30 sec, no card)")
-        gemini_key = st.text_input(
-            "Google Gemini Key", value="", type="password",
-            help="FREE · 1 500 req/day · aistudio.google.com")
-        openrouter_key = st.text_input(
-            "OpenRouter Key", value="", type="password",
-            help="FREE tier · openrouter.ai")
-
-    # 2 — SEARCH PROVIDER KEYS ────────────────────────────────────────────────
-    with st.expander("🔑 Search provider keys (optional free tiers)", expanded=False):
-        exa_key       = st.text_input("Exa API Key",       value="", type="password",
-                                       help="1 000 free/month · exa.ai")
-        tavily_key    = st.text_input("Tavily API Key",    value="", type="password",
-                                       help="1 000 free/month · tavily.com")
-        serpapi_key   = st.text_input("SerpApi Key",       value="", type="password",
-                                       help="100 free/month · serpapi.com")
-        firecrawl_key = st.text_input("Firecrawl API Key", value="", type="password",
-                                       help="JS-heavy sites · free trial · firecrawl.dev")
-
-    # 3 — PAID KEYS ───────────────────────────────────────────────────────────
-    with st.expander("💳 Paid LLM keys (optional fallback)", expanded=False):
-        anthropic_key = st.text_input("Anthropic Claude", value="", type="password")
-        openai_key    = st.text_input("OpenAI GPT",       value="", type="password")
-
-    st.divider()
-
-    # 4 — MODE ────────────────────────────────────────────────────────────────
-    st.header("⚙️ Search Mode")
-    mode = st.radio(
-        "Mode", ["Fast", "Balanced", "Deep"],
-        index=1, horizontal=True,
-        help="Mode auto-sets providers and budget below.",
-    )
-    preset = MODE_PRESETS[mode]
-    st.caption(f"ℹ️ {preset['description']}")
-
-    st.divider()
-
-    # 5 — RESULTS ─────────────────────────────────────────────────────────────
-    st.header("🎯 Results")
-    max_results = st.number_input(
-        "Max results to return", 1, 500, 25, step=5,
-        help="Agent keeps searching until this many accepted results are found or budget runs out.")
-    min_conf = st.slider(
-        "Min confidence score", 0, 100, 35, step=5,
-        help="Lower = more results, some noise. 35 is a good starting point.")
-
-    st.header("📋 Fields to collect")
-    field_website  = st.checkbox("Website",           value=True)
-    field_email    = st.checkbox("Email",              value=True)
-    field_phone    = st.checkbox("Phone / contact",    value=True)
-    field_linkedin = st.checkbox("LinkedIn",           value=False)
-    field_hq       = st.checkbox("HQ country",         value=False)
-    field_presence = st.checkbox("Branch presence",    value=False)
-    field_summary  = st.checkbox("Summary / abstract", value=False)
-
-    st.divider()
-
-    # 6 — PROVIDERS (auto-set by mode) ────────────────────────────────────────
-    st.header("🔌 Providers")
-    st.caption("Auto-set by mode. Override if needed.")
-    p = preset["providers"]
-    use_ddg       = st.checkbox("DuckDuckGo (always free)",       value=p["ddg"])
-    use_exa       = st.checkbox("Exa (1 000 free/month)",          value=p["exa"])
-    use_tavily    = st.checkbox("Tavily (1 000 free/month)",       value=p["tavily"])
-    use_serpapi   = st.checkbox("SerpApi (100 free/month)",        value=p["serpapi"])
-    use_firecrawl = st.checkbox(
-        "Firecrawl (JS-heavy sites fallback)",
-        value=p["firecrawl"],
-        help=(
-            "Firecrawl is used automatically when normal scraping returns 403/timeout. "
-            "Requires a Firecrawl API key. Free trial at firecrawl.dev."
-        ),
-    )
-
-    # 7 — BUDGET (auto-set by mode) ───────────────────────────────────────────
-    st.header("💰 Budget caps")
-    st.caption("Auto-set by mode. Increase for more results; decrease to save API credits.")
-    b = preset["budget"]
-    max_total_calls   = st.number_input("Max total search calls", 1, 200, b["total"],   step=1)
-    max_ddg_calls     = st.number_input("Max DDG calls",          0,  50, b["ddg"],     step=1)
-    max_exa_calls     = st.number_input("Max Exa calls",          0,  50, b["exa"],     step=1)
-    max_tavily_calls  = st.number_input("Max Tavily calls",       0,  50, b["tavily"],  step=1)
-    max_serpapi_calls = st.number_input("Max SerpApi calls",      0,  50, b["serpapi"], step=1)
-    max_pages         = st.number_input("Max pages to scrape",    1, 500, b["pages"],   step=10)
-
-    st.divider()
-
-    # 8 — ADVANCED ────────────────────────────────────────────────────────────
-    with st.expander("🎛️ Advanced overrides (auto-detected, edit if wrong)", expanded=False):
-        st.caption("The agent detects these from your prompt. Only change if the detection is wrong.")
-        task_override   = st.selectbox("Task type",
-            ["auto","entity_discovery","entity_enrichment",
-             "similar_entity_expansion","market_research","document_research"], index=0)
-        entity_override = st.selectbox("Entity type",
-            ["auto","company","person","paper","organization","event","product"], index=0)
-        format_override = st.selectbox("Output format",
-            ["auto","xlsx","csv","json","pdf"], index=0)
-        export_filename = st.text_input("Export filename", value="results")
-        auto_summarize_papers = st.checkbox("Auto-summarize papers after search", value=True)
-        paper_summary_limit = st.number_input("Top N papers for richer Feynman summaries", 0, 20, 5, step=1, help="All papers will still get a quick review. This controls how many top papers receive the richer Feynman pass when available.")
-        paper_synthesis_mode = st.selectbox(
-            "Combined synthesis mode",
-            ["lit", "deepresearch"],
-            index=0,
-            help="lit is faster. deepresearch is slower but more detailed.",
-        )
-        export_summary_pdf = st.checkbox("Create PDF research summary", value=True)
-
-    # 9 — SEED FILE ───────────────────────────────────────────────────────────
-    with st.expander("📂 Seed file — deduplication", expanded=False):
-        st.caption("Upload your existing company list. New results won't duplicate them.")
-        uploaded_file   = st.file_uploader("CSV or Excel file", type=["csv","xlsx"])
-        use_seed_dedupe = st.checkbox("Deduplicate against seed file", value=True)
+def _title_list(items: list[str]) -> list[str]:
+    out = []
+    for item in items or []:
+        s = str(item).strip()
+        if s:
+            out.append(s.title())
+    return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main prompt area
-# ─────────────────────────────────────────────────────────────────────────────
-EXAMPLES = [
-    ("Companies", "Find oilfield service companies in Saudi Arabia and UAE with email and phone"),
-    ("Companies", "Find digital oil and gas software companies outside USA and Egypt with email"),
-    ("Companies", "Find renewable energy software companies in Germany and Norway with email"),
-    ("Companies", "Find AI and data analytics companies in the energy sector outside USA with LinkedIn"),
-    ("Companies", "Find upstream drilling services contractors in Middle East with contact details"),
-    ("Papers",    "Find research papers about Electrical Submersible Pump with title, authors and export as PDF"),
-    ("Papers",    "Find papers about efficacy of TMS in management of stuttering with authors, export in pdf file"),
-    ("Papers",    "Find papers about carbon capture CCS techniques, export to CSV"),
-]
+def _humanize_task_type(task_type: str) -> str:
+    return {
+        "entity_discovery": "🏢 Companies",
+        "document_research": "📄 Research Papers",
+        "people_search": "👥 LinkedIn Profiles",
+        "market_research": "📊 Market Research",
+        "entity_enrichment": "🧩 Entity Enrichment",
+        "similar_entity_expansion": "🧭 Similar Entities",
+    }.get(task_type, "🔍 Entities")
 
-st.title("🔍 AI Research Agent")
-st.caption(
-    "Find companies, research papers, or any entity — just describe what you want in plain language. "
-    "The agent searches multiple sources, filters noise, and exports clean structured results."
+
+def _humanize_target_category(category: str) -> str:
+    return {
+        "software_company": "Digital / software companies",
+        "service_company": "Service / engineering companies",
+        "general": "General companies",
+    }.get((category or "").strip(), (category or "general").replace("_", " ").title())
+
+
+def _humanize_commercial_intent(value: str) -> str:
+    return {
+        "general": "General",
+        "agent_or_distributor": "Agent / distributor",
+        "reseller": "Reseller",
+        "partner": "Partner / channel partner",
+    }.get((value or "general").strip(), (value or "general").replace("_", " ").title())
+
+
+_DIGITAL_CATEGORY_HINTS = (
+    "digital", "software", "saas", "platform", "analytics", "automation",
+    "ai", "artificial intelligence", "machine learning", "data", "iot",
+    "scada", "cloud", "tech company", "technology company", "technology vendor",
 )
 
-with st.expander("💡 Example prompts", expanded=False):
+
+_PRESENCE_OUTSIDE_PATTERNS = [
+    r"\boperate(?:s|d|ing)?\s+outside\b",
+    r"\bwork(?:s|ed|ing)?\s+outside\b",
+    r"\bserv(?:e|es|ed|ing)\s+outside\b",
+    r"\bactive\s+outside\b",
+    r"\bpresent\s+outside\b",
+    r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
+    r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
+    r"\b(?:do(?:es)?\s+not|don't|doesn't|cannot|can't)\s+(?:operate|work|serve|have|be\s+active|be\s+present)\b.*?\b(?:in|inside|within)\b",
+    r"\bnot\s+(?:operating|working|serving|active|present)\b.*?\b(?:in|inside|within)\b",
+    r"\bexclude\b[^.\n;]{0,80}\bpresence\b",
+    r"\bexcluding\b[^.\n;]{0,80}\bpresence\b",
+]
+
+_SOLUTION_KEYWORD_PATTERNS = {
+    "machine learning": [r"\bmachine learning\b", r"\bml\b"],
+    "artificial intelligence": [r"\bartificial intelligence\b"],
+    "ai": [r"\bai\b"],
+    "analytics": [r"\banalytics\b", r"\banalytic\b", r"\binsights\b"],
+    "monitoring": [r"\bmonitoring\b", r"\bremote monitoring\b", r"\bsurveillance\b"],
+    "optimization": [r"\boptimization\b", r"\boptimisation\b", r"\boptimizer\b", r"\boptimiser\b"],
+    "automation": [r"\bautomation\b", r"\bautomated\b", r"\bautonomous\b"],
+    "iot": [r"\biot\b", r"\binternet of things\b"],
+    "scada": [r"\bscada\b"],
+    "digital twin": [r"\bdigital twin\b", r"\bdigital twins\b"],
+    "predictive maintenance": [r"\bpredictive maintenance\b"],
+}
+
+
+_DOMAIN_KEYWORD_PATTERNS = {
+    "wireline": [r"\bwireline\b", r"\bwire line\b"],
+    "slickline": [r"\bslickline\b", r"\bslick line\b"],
+    "e-line": [r"\be-line\b", r"\beline\b", r"\belectric line\b", r"\be-line services\b"],
+    "well logging": [r"\bwell logging\b", r"\bwell log(?:ging)?\b"],
+    "open hole logging": [r"\bopen hole logging\b", r"\bopen-hole logging\b"],
+    "cased hole logging": [r"\bcased hole logging\b", r"\bcased-hole logging\b"],
+    "perforation": [r"\bperforation\b", r"\bperforating\b"],
+    "memory gauge": [r"\bmemory gauge\b", r"\bmemory gauges\b"],
+    "well intervention": [r"\bwell intervention\b"],
+    "completion": [r"\bcompletion services?\b", r"\bwell completion\b"],
+    "coiled tubing": [r"\bcoiled tubing\b", r"\bcoiled-tubing\b"],
+    "well testing": [r"\bwell testing\b", r"\bwell test\b"],
+    "mud logging": [r"\bmud logging\b"],
+    "drilling fluids": [r"\bdrilling fluids?\b", r"\bmud engineering\b"],
+    "cementing": [r"\bcementing\b", r"\bcementation\b"],
+    "fishing": [r"\bfishing services?\b", r"\bdownhole fishing\b"],
+    "downhole tools": [r"\bdownhole tools?\b"],
+    "well stimulation": [r"\bwell stimulation\b", r"\bstimulation services?\b"],
+    "acidizing": [r"\bacidizing\b", r"\bacidising\b", r"\bacid stimulation\b"],
+    "fracturing": [r"\bfracturing\b", r"\bfracking\b", r"\bhydraulic fracturing\b"],
+    "pipeline inspection": [r"\bpipeline inspection\b"],
+    "ndt": [r"\bndt\b", r"\bnon[- ]destructive testing\b"],
+    "asset integrity": [r"\basset integrity\b", r"\bintegrity management\b"],
+    "corrosion monitoring": [r"\bcorrosion monitoring\b"],
+    "instrumentation": [r"\binstrumentation\b"],
+    "automation": [r"\bindustrial automation\b", r"\bprocess automation\b", r"\bautomation\b"],
+    "scada": [r"\bscada\b"],
+    "process control": [r"\bprocess control\b"],
+    "offshore": [r"\boffshore\b"],
+    "marine services": [r"\bmarine services?\b"],
+    "diving services": [r"\bdiving services?\b"],
+    "rov": [r"\brov\b", r"\bremotely operated vehicle\b"],
+    "oilfield chemicals": [r"\boilfield chemicals?\b", r"\bproduction chemicals?\b", r"\bdrilling chemicals?\b"],
+    "water treatment": [r"\bwater treatment\b"],
+    "hse": [r"\bhse\b", r"\bhealth safety\b", r"\bprocess safety\b"],
+    "fire and gas": [r"\bfire and gas\b", r"\bgas detection\b"],
+    "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
+    "rod pump": [r"\brod pump\b", r"\bsucker rod pump\b"],
+    "gas lift": [r"\bgas lift\b"],
+    "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
+    "well performance": [r"\bwell performance\b"],
+    "artificial lift": [r"\bartificial lift\b"],
+    "production optimization": [r"\bproduction optimization\b", r"\bproduction optimisation\b"],
+    "well surveillance": [r"\bwell surveillance\b"],
+    "multiphase metering": [r"\bmultiphase metering\b", r"\bmultiphase meter\b"],
+    "flow assurance": [r"\bflow assurance\b"],
+    "production monitoring": [r"\bproduction monitoring\b"],
+    "reservoir simulation": [r"\breservoir simulation\b"],
+    "reservoir modeling": [r"\breservoir modeling\b", r"\breservoir modelling\b"],
+    "drilling": [r"\bdrilling\b"],
+    "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
+    "production engineering": [r"\bproduction engineering\b"],
+}
+
+_GEO_EVIDENCE_HINTS = {
+    "egypt": [r"\begypt\b", r"\begyptian\b", r"\bcairo\b", r"\balexandria\b", r"\bsuez\b", r"\bport said\b", r"\b6th of october\b", r"\bnew cairo\b", r"\+20\b", r"\.eg\b"],
+    "united arab emirates": [r"\buae\b", r"\bunited arab emirates\b", r"\bdubai\b", r"\babudhabi\b", r"\babu dhabi\b", r"\bsharjah\b", r"\.ae\b"],
+    "united kingdom": [r"\buk\b", r"\bu\.k\.\b", r"\bunited kingdom\b", r"\bengland\b", r"\bscotland\b", r"\bwales\b", r"\blondon\b", r"\.uk\b"],
+    "united states": [r"\busa\b", r"\bu\.s\.a\.\b", r"\bunited states\b", r"\bhouston\b", r"\.us\b"],
+    "norway": [r"\bnorway\b", r"\bnorwegian\b", r"\boslo\b", r"\bstavanger\b", r"\.no\b"],
+    "saudi arabia": [r"\bsaudi arabia\b", r"\bsaudi\b", r"\bdammam\b", r"\bdhahran\b", r"\bal khobar\b", r"\.sa\b"],
+    "qatar": [r"\bqatar\b", r"\bdoha\b", r"\.qa\b"],
+    "oman": [r"\boman\b", r"\bmuscat\b", r"\.om\b"],
+    "kuwait": [r"\bkuwait\b", r"\.kw\b"],
+    "bahrain": [r"\bbahrain\b", r"\.bh\b"],
+}
+
+_SERVICE_RESULT_HINTS = [
+    "service", "services", "contractor", "engineering", "inspection", "maintenance",
+    "wireline", "slickline", "logging", "well intervention", "coiled tubing",
+    "testing", "instrumentation", "automation", "pipeline", "integrity",
+    "oilfield", "petroleum services", "production services", "drilling services",
+]
+
+
+def _extract_solution_keywords_from_prompt(prompt_lower: str) -> list[str]:
+    found = []
+    for label, patterns in _SOLUTION_KEYWORD_PATTERNS.items():
+        if any(re.search(p, prompt_lower) for p in patterns):
+            found.append(label)
+    return found
+
+
+def _extract_domain_keywords_from_prompt(prompt_lower: str) -> list[str]:
+    found = []
+    for label, patterns in _DOMAIN_KEYWORD_PATTERNS.items():
+        if any(re.search(p, prompt_lower) for p in patterns):
+            found.append(label)
+    return found
+
+
+def _extract_commercial_intent_from_prompt(prompt_lower: str) -> str:
+    if re.search(r"\b(agent|agency|distributor|distribution|local representation|representative|representation)\b", prompt_lower):
+        return "agent_or_distributor"
+    if re.search(r"\b(reseller|resellers)\b", prompt_lower):
+        return "reseller"
+    if re.search(r"\b(partner|partners|channel partner|channel partners)\b", prompt_lower):
+        return "partner"
+    return "general"
+
+
+
+def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
+    prompt_lower = _normalize_prompt_text(prompt)
+
+    if getattr(task_spec, "task_type", "") in {
+        "entity_discovery", "market_research", "similar_entity_expansion", "entity_enrichment"
+    }:
+        if any(hint in prompt_lower for hint in _DIGITAL_CATEGORY_HINTS):
+            task_spec.target_category = "software_company"
+
+    if not list(getattr(task_spec, "solution_keywords", []) or []):
+        task_spec.solution_keywords = _extract_solution_keywords_from_prompt(prompt_lower)
+
+    if not list(getattr(task_spec, "domain_keywords", []) or []):
+        task_spec.domain_keywords = _extract_domain_keywords_from_prompt(prompt_lower)
+
+    if getattr(task_spec, "commercial_intent", "general") == "general":
+        task_spec.commercial_intent = _extract_commercial_intent_from_prompt(prompt_lower)
+
+    geo = getattr(task_spec, "geography", None)
+    if geo is not None:
+        has_presence_outside = any(re.search(pat, prompt_lower) for pat in _PRESENCE_OUTSIDE_PATTERNS)
+        if has_presence_outside and getattr(geo, "exclude_countries", None) and not getattr(geo, "exclude_presence_countries", None):
+            geo.exclude_presence_countries = sorted(set(list(geo.exclude_countries or [])))
+            geo.exclude_countries = [c for c in (geo.exclude_countries or []) if c not in set(geo.exclude_presence_countries or [])]
+
+        geo.strict_mode = bool(
+            list(getattr(geo, "include_countries", []) or [])
+            or list(getattr(geo, "exclude_countries", []) or [])
+            or list(getattr(geo, "exclude_presence_countries", []) or [])
+        )
+
+    industry = _clean_text(getattr(task_spec, "industry", ""))
+    domain_keywords = list(getattr(task_spec, "domain_keywords", []) or [])
+    if domain_keywords and (not industry or industry.lower() in {"oil and gas", "oil & gas", "energy", "petroleum"}):
+        task_spec.industry = f"{', '.join(domain_keywords[:4])} in oil and gas"
+
+    return task_spec
+
+def _normalize_paper_records(records: list[dict]) -> pd.DataFrame:
+    rows = []
+    for r in records:
+        rows.append(
+            {
+                "Title": _first_nonempty(r, ["company_name", "title", "paper_title", "document_title", "name"]),
+                "Authors": _first_nonempty(r, ["authors", "author", "paper_authors", "creators", "creator"]),
+                "Year": _parse_year(_first_nonempty(r, [
+                    "publication_year", "year", "published_year", "publication_date", "published_date", "date"
+                ])),
+                "Abstract": _first_nonempty(r, ["description", "abstract", "summary", "snippet", "paper_abstract"]),
+                "URL": _first_nonempty(r, ["website", "url", "paper_url", "source_url", "link"]),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["Title", "Abstract", "URL"])
+
+    keep_cols = []
+    for c in df.columns:
+        nonempty = df[c].astype(str).str.strip().replace({"nan": "", "None": ""})
+        if c in {"Title", "Abstract", "URL"} or (nonempty != "").any():
+            keep_cols.append(c)
+    return df[keep_cols].copy()
+
+
+_BAD_HOST_HINTS = [
+    "wikipedia.org", "facebook.com", "instagram.com", "youtube.com", "x.com",
+    "twitter.com", "companiesmarketcap.com", "worldpopulationreview.com",
+    "alamy.com", "shutterstock.com",
+]
+_BAD_PATH_HINTS = ["/news/", "/blog/", "/article/", "/articles/", "/wiki/"]
+_BAD_TEXT_HINTS = [
+    "top oil and gas companies", "largest oil and gas companies", "market cap",
+    "stock photo", "directory", "list of companies", "ranking",
+]
+_DIGITAL_RESULT_HINTS = [
+    "software", "platform", "saas", "analytics", "automation", "digital",
+    "ai", "iot", "scada", "monitoring", "optimization", "data platform", "cloud",
+]
+_COMPANYISH_HINTS = [
+    "company", "vendor", "provider", "technology", "solutions", "platform", "software", "services"
+]
+
+
+
+def _record_text(record: dict) -> str:
+    parts = [
+        record.get("company_name"), record.get("description"), record.get("summary"),
+        record.get("snippet"), record.get("website"), record.get("url"),
+        record.get("linkedin_url"), record.get("hq_country"), record.get("presence_countries"),
+        record.get("country"), record.get("location"), record.get("city"), record.get("title"),
+    ]
+    return _normalize_prompt_text(" ".join(str(p) for p in parts if not _is_blank(p)))
+
+
+def _country_patterns(country: str) -> list[str]:
+    c = _normalize_prompt_text(country)
+    if c in _GEO_EVIDENCE_HINTS:
+        return _GEO_EVIDENCE_HINTS[c]
+    return [rf"\b{re.escape(c)}\b"] if c else []
+
+
+def _record_matches_any_country(record: dict, countries: list[str]) -> bool:
+    if not countries:
+        return True
+    text = _record_text(record)
+    if not text:
+        return False
+    for country in countries:
+        for pat in _country_patterns(country):
+            if re.search(pat, text, re.IGNORECASE):
+                return True
+    return False
+
+
+def _record_matches_excluded_country(record: dict, countries: list[str]) -> bool:
+    if not countries:
+        return False
+    text = _record_text(record)
+    if not text:
+        return False
+    for country in countries:
+        for pat in _country_patterns(country):
+            if re.search(pat, text, re.IGNORECASE):
+                return True
+    return False
+
+
+def _requires_geo_evidence(task_meta: dict) -> bool:
+    include_countries = list(task_meta.get("include_countries") or [])
+    strict_mode = bool(task_meta.get("strict_mode"))
+    if not strict_mode or not include_countries:
+        return False
+    normalized = [_normalize_prompt_text(c) for c in include_countries]
+    if "egypt" in normalized:
+        return True
+    return len(include_countries) <= 2
+
+
+def _is_valid_company_record(record: dict, task_meta: dict) -> bool:
+    name = _clean_text(record.get("company_name"))
+    website = _clean_text(record.get("website") or record.get("url"))
+    text = _record_text(record)
+    target_category = (task_meta.get("target_category") or "general").strip()
+
+    if not name and not website:
+        return False
+
+    if website:
+        parsed = urlparse(website if "://" in website else f"https://{website}")
+        host = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+        if any(bad in host for bad in _BAD_HOST_HINTS):
+            return False
+        if any(bad in path for bad in _BAD_PATH_HINTS):
+            return False
+
+    if any(bad in text for bad in _BAD_TEXT_HINTS):
+        return False
+
+    if len(name.split()) > 10 and any(bad in text for bad in ["top", "best", "largest", "ranking", "list"]):
+        return False
+
+    if target_category == "software_company":
+        digital_ok = any(h in text for h in _DIGITAL_RESULT_HINTS)
+        companyish_ok = bool(website) or any(h in text for h in _COMPANYISH_HINTS)
+        if not (digital_ok and companyish_ok):
+            return False
+
+    if target_category == "service_company":
+        serviceish_ok = any(h in text for h in _SERVICE_RESULT_HINTS)
+        companyish_ok = bool(website) or any(h in text for h in _COMPANYISH_HINTS)
+        if not (serviceish_ok and companyish_ok):
+            return False
+
+    include_countries = list(task_meta.get("include_countries") or [])
+    exclude_countries = list(task_meta.get("exclude_countries") or [])
+    exclude_presence_countries = list(task_meta.get("exclude_presence_countries") or [])
+
+    if _requires_geo_evidence(task_meta):
+        if not _record_matches_any_country(record, include_countries):
+            return False
+
+    if exclude_presence_countries and _record_matches_excluded_country(record, exclude_presence_countries):
+        return False
+
+    if exclude_countries and _record_matches_excluded_country(record, exclude_countries):
+        return False
+
+    return True
+
+def _refine_company_records(records: list[dict], task_meta: dict) -> tuple[list[dict], int]:
+    if task_meta.get("task_type") in {"document_research", "people_search"}:
+        return records or [], 0
+
+    refined, removed = [], 0
+    for record in records or []:
+        if _is_valid_company_record(record, task_meta):
+            refined.append(record)
+        else:
+            removed += 1
+
+    # Critical: do NOT fall back to the original records when strict geography
+    # or strict exclusion filters are active. Falling back reintroduces generic
+    # global hits and defeats the whole Egypt-only / exclude-country intent.
+    geo_strict = bool(task_meta.get("strict_mode")) or bool(task_meta.get("include_countries")) or bool(task_meta.get("exclude_presence_countries")) or bool(task_meta.get("exclude_countries"))
+    if geo_strict:
+        return refined, removed
+
+    # For fully global searches only, keep the old behavior so the UI does not
+    # go blank when the lightweight app-side validator is too strict.
+    if not refined:
+        return records or [], 0
+    return refined, removed
+
+
+def _df_to_pdf_bytes(df: pd.DataFrame, title: str = "Results", is_papers: bool = False) -> bytes | None:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except Exception:
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    def _pdf_escape(text: str) -> str:
+        return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _clean_cell(value, max_len: int = 1200) -> str:
+        text = _clean_text(value)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > max_len:
+            text = text[: max_len - 3] + "..."
+        return text
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    heading_style = styles["Heading2"]
+    meta_style = ParagraphStyle(
+        "Meta", parent=styles["BodyText"], fontSize=9, leading=11, spaceAfter=4,
+        alignment=TA_LEFT, textColor=colors.HexColor("#333333")
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles["BodyText"], fontSize=10, leading=14, spaceAfter=8, alignment=TA_LEFT
+    )
+    link_style = ParagraphStyle(
+        "Link", parent=styles["BodyText"], fontSize=8, leading=10, spaceAfter=10,
+        alignment=TA_LEFT, textColor=colors.HexColor("#1a4f7a")
+    )
+
+    if is_papers or {"Title", "Abstract"}.issubset(set(df.columns)):
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+        story = [Paragraph(_pdf_escape(title), title_style), Spacer(1, 10), Paragraph(f"{len(df)} results", meta_style), Spacer(1, 12)]
+
+        for i, (_, row) in enumerate(df.iterrows(), start=1):
+            paper_title = _clean_cell(row.get("Title", ""), 300)
+            authors = _clean_cell(row.get("Authors", ""), 250) if "Authors" in df.columns else ""
+            year = _clean_cell(row.get("Year", ""), 20) if "Year" in df.columns else ""
+            abstract = _clean_cell(row.get("Abstract", ""), 2500)
+            url = _clean_cell(row.get("URL", ""), 400) if "URL" in df.columns else ""
+
+            if not paper_title and not abstract and not url:
+                continue
+
+            story.append(Paragraph(f"{i}. {_pdf_escape(paper_title or 'Untitled')}", heading_style))
+            meta_parts = []
+            if authors:
+                meta_parts.append(f"<b>Authors:</b> {_pdf_escape(authors)}")
+            if year:
+                meta_parts.append(f"<b>Year:</b> {_pdf_escape(year)}")
+            if meta_parts:
+                story.append(Paragraph(" &nbsp;&nbsp; ".join(meta_parts), meta_style))
+            if abstract:
+                story.append(Paragraph(f"<b>Abstract:</b> {_pdf_escape(abstract)}", body_style))
+            if url:
+                story.append(Paragraph(f"<b>URL:</b> {_pdf_escape(url)}", link_style))
+            story.append(Spacer(1, 10))
+            if i < len(df) and i % 3 == 0:
+                story.append(PageBreak())
+
+        doc.build(story)
+        return buf.getvalue()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=24, rightMargin=24, topMargin=24, bottomMargin=24)
+    story = [Paragraph(_pdf_escape(title), title_style), Spacer(1, 10), Paragraph(f"{len(df)} results", meta_style), Spacer(1, 10)]
+
+    pdf_df = df.copy()
+    table_header_style = ParagraphStyle("TableHeader", parent=styles["BodyText"], fontSize=8, leading=10, alignment=TA_LEFT)
+    table_cell_style = ParagraphStyle("TableCell", parent=styles["BodyText"], fontSize=7, leading=9, alignment=TA_LEFT)
+
+    wrapped_header = [Paragraph(f"<b>{_pdf_escape(col)}</b>", table_header_style) for col in pdf_df.columns]
+    wrapped_rows = []
+    for _, row in pdf_df.iterrows():
+        wrapped_rows.append([Paragraph(_pdf_escape(_clean_cell(row[col], 500)), table_cell_style) for col in pdf_df.columns])
+
+    table_data = [wrapped_header] + wrapped_rows[:200]
+    ncols = len(pdf_df.columns)
+    if ncols <= 3:
+        col_widths = [180, 280, 220][:ncols]
+    elif ncols == 4:
+        col_widths = [140, 180, 240, 160]
+    else:
+        usable_width = 780
+        col_widths = [usable_width / ncols] * ncols
+
+    table = Table(table_data, repeatRows=1, colWidths=col_widths)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9e2f3")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(table)
+    if len(pdf_df) > 200:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Note: PDF includes first 200 rows only.", meta_style))
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sidebar
+# ──────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown('<p class="section-header">🔑 Your API Keys</p>', unsafe_allow_html=True)
+    st.markdown(
+        "The agent is free to use. It needs API keys to search and reason. "
+        "**One free key is enough to start** — Groq takes 30 seconds to get."
+    )
+
+    with st.expander("⚡ Groq Key — Free, most important", expanded=True):
+        groq_key = st.text_input("Groq API Key", value=_secret("GROQ_API_KEY"), type="password", placeholder="gsk_...", label_visibility="collapsed")
+        st.success(f"✅ Groq connected  ({_mask(groq_key)})") if groq_key else _show_key_guide("groq")
+
+    with st.expander("🧠 Gemini Key — Free backup LLM", expanded=False):
+        gemini_key = st.text_input("Gemini Key", value=_secret("GEMINI_API_KEY"), type="password", placeholder="AIza...", label_visibility="collapsed")
+        st.success(f"✅ Gemini connected  ({_mask(gemini_key)})") if gemini_key else _show_key_guide("gemini")
+
+    st.markdown('<p class="section-header">🔭 Search Provider Keys</p>', unsafe_allow_html=True)
+    st.caption("Optional but strongly recommended. Each is free with generous quotas.")
+
+    with st.expander("🔭 Exa — semantic search + LinkedIn profiles", expanded=False):
+        exa_key = st.text_input("Exa Key", value=_secret("EXA_API_KEY"), type="password", placeholder="your-exa-key", label_visibility="collapsed")
+        st.success(f"✅ Exa connected  ({_mask(exa_key)})") if exa_key else _show_key_guide("exa")
+
+    with st.expander("🌐 Tavily — question-style search", expanded=False):
+        tavily_key = st.text_input("Tavily Key", value=_secret("TAVILY_API_KEY"), type="password", placeholder="tvly-...", label_visibility="collapsed")
+        st.success(f"✅ Tavily connected  ({_mask(tavily_key)})") if tavily_key else _show_key_guide("tavily")
+
+    with st.expander("🎯 SerpApi — LinkedIn + Google search", expanded=False):
+        serpapi_key = st.text_input("SerpApi Key", value=_secret("SERPAPI_KEY"), type="password", placeholder="your-serpapi-key", label_visibility="collapsed")
+        st.success(f"✅ SerpApi connected  ({_mask(serpapi_key)})") if serpapi_key else _show_key_guide("serpapi")
+
+    anthropic_key = _secret("ANTHROPIC_API_KEY")
+    openai_key = _secret("OPENAI_API_KEY")
+    openrouter_key = _secret("OPENROUTER_API_KEY")
+    firecrawl_key = _secret("FIRECRAWL_API_KEY")
+
+    active_keys = []
+    if groq_key:
+        active_keys.append("Groq")
+    if gemini_key:
+        active_keys.append("Gemini")
+    if exa_key:
+        active_keys.append("Exa")
+    if tavily_key:
+        active_keys.append("Tavily")
+    if serpapi_key:
+        active_keys.append("SerpApi")
+    if anthropic_key:
+        active_keys.append("Claude")
+    if openai_key:
+        active_keys.append("GPT")
+
+    if active_keys:
+        st.success(f"**Active:** {' · '.join(active_keys)}")
+    else:
+        st.error("⚠️ No keys yet — add at least a free Groq key above.")
+
+    st.divider()
+    st.markdown('<p class="section-header">⚙️ Search Options</p>', unsafe_allow_html=True)
+    mode_label = st.radio("Search depth", list(MODE_PRESETS.keys()), index=1, help="Balanced is recommended for most searches.")
+    preset = MODE_PRESETS[mode_label]
+    mode = preset["mode"]
+    st.caption(preset["desc"])
+    max_results = st.slider("Max results", 5, 150, value=preset["max"], step=5, help="How many results you want. More = slower search.")
+
+    st.divider()
+    st.markdown('<p class="section-header">📂 Avoid Duplicates</p>', unsafe_allow_html=True)
+    st.caption("Upload a previous results file — new results won't repeat those.")
+    uploaded_file = st.file_uploader("Previous results (CSV or Excel)", type=["csv", "xlsx"], label_visibility="collapsed")
+    if uploaded_file:
+        st.success(f"✅ Dedup file loaded: {uploaded_file.name}")
+
+    st.divider()
+    with st.expander("🛠️ Advanced options", expanded=False):
+        min_conf = st.slider("Min confidence score", 0, 100, 35, step=5, help="Lower = more results but less accurate.")
+        export_fmt = st.selectbox("Export format", ["Auto-detect from prompt", "Excel (.xlsx)", "CSV (.csv)", "PDF (.pdf)"])
+        export_filename = st.text_input("Export filename", value="results")
+        st.caption("**Fields to collect:**")
+        col1, col2 = st.columns(2)
+        field_website = col1.checkbox("Website", value=True)
+        field_email = col1.checkbox("Email", value=True)
+        field_phone = col1.checkbox("Phone", value=True)
+        field_linkedin = col2.checkbox("LinkedIn URL", value=False)
+        field_hq = col2.checkbox("HQ Country", value=False)
+        field_summary = col2.checkbox("Summary", value=False)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LLM client
+# ──────────────────────────────────────────────────────────────────────────────
+llm_client = FreeLLMClient(
+    groq_api_key=groq_key,
+    gemini_api_key=gemini_key,
+    openrouter_api_key=openrouter_key,
+    anthropic_api_key=anthropic_key,
+    openai_api_key=openai_key,
+)
+backends = llm_client.available_backends()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main area
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown(
+    "<h1 style='margin-bottom:0'>🔍 AI Research Agent</h1>"
+    "<p style='color:#7b8099; font-size:15px; margin-top:4px; font-family:IBM Plex Sans'>"
+    "Find companies, research papers, or LinkedIn profiles — just describe what you want in plain English."
+    "</p>",
+    unsafe_allow_html=True,
+)
+
+with st.expander("💡 Example searches", expanded=False):
     for cat, ex in EXAMPLES:
-        c1, c2 = st.columns([1, 9])
-        c1.caption(f"`{cat}`")
-        if c2.button(ex, key=f"ex_{hash(ex)}"):
+        c1, c2 = st.columns([1, 8])
+        c1.markdown(f"<span class='tag'>{cat}</span>", unsafe_allow_html=True)
+        if c2.button(ex, key=f"ex_{hash(ex)}", use_container_width=True):
             st.session_state["prompt_value"] = ex
             st.rerun()
 
 prompt = st.text_area(
     "What do you want to research?",
     value=st.session_state.get("prompt_value", ""),
-    height=90,
+    height=100,
     placeholder=(
-        "Examples:\n"
-        "• Find oilfield service companies in Saudi Arabia and UAE with email and phone\n"
-        "• Find research papers about ESP Electrical Submersible Pump with title and authors, export as PDF\n"
-        "• Find digital oil and gas software companies outside USA and Egypt with email"
+        "• Find oilfield service companies in Egypt and Saudi Arabia with email and phone\n"
+        "• Find LinkedIn profiles of petroleum engineers in oil gas companies in Egypt\n"
+        "• Find research papers about ESP electrical submersible pump with authors export as PDF"
     ),
     key="main_prompt",
 )
+st.session_state["prompt_value"] = prompt
 
-# ── PEOPLE SEARCH OPTIONS (shown when LinkedIn is detected) ─────────────
-if st.session_state.get("prompt_value", "") or prompt.strip():
-    _check_prompt = (st.session_state.get("prompt_value", "") or prompt or "").lower()
-    _is_people = any(w in _check_prompt for w in [
-        "linkedin", "people", "engineers", "managers", "hr", "professionals",
-        "employees", "staff", "personnel",
-    ])
-    if _is_people:
-        with st.expander("👥 LinkedIn People Search Options", expanded=True):
-            st.info(
-                "🔍 **LinkedIn People Search mode detected.** The agent will use "
-                "`site:linkedin.com/in` X-ray searches via Google/DDG/SerpApi to find "
-                "public LinkedIn profiles. No LinkedIn account or API needed."
-            )
-            c1, c2 = st.columns(2)
-            job_levels_sel = c1.multiselect(
-                "Job levels to search",
-                options=["Engineer / Specialist", "Manager / Supervisor",
-                         "Director / VP", "HR / Talent Acquisition", "Executive / C-suite"],
-                default=["Engineer / Specialist", "Manager / Supervisor",
-                         "HR / Talent Acquisition"],
-                help="Select which seniority levels to target.",
-            )
-            _level_map = {
-                "Engineer / Specialist":    "engineer",
-                "Manager / Supervisor":     "manager",
-                "Director / VP":            "director",
-                "HR / Talent Acquisition":  "hr",
-                "Executive / C-suite":      "executive",
-            }
-            st.session_state["job_levels"] = [_level_map[l] for l in job_levels_sel]
+_has_llm = bool(groq_key or gemini_key or anthropic_key or openai_key or openrouter_key)
+_has_search = bool(exa_key or tavily_key or serpapi_key)
+if not _has_llm and not _has_search:
+    st.warning("⚠️ No API keys set — results will be limited (DDG-only, no ranking). Add a free Groq key in the sidebar for much better results.")
 
-            extra_titles = c2.text_input(
-                "Extra job titles (optional, comma-separated)",
-                value="",
-                placeholder="e.g. Wellsite Geologist, Reservoir Specialist",
-                help="Add specific job titles beyond the levels above.",
-            )
-            st.session_state["extra_job_titles"] = [
-                t.strip() for t in extra_titles.split(",") if t.strip()
-            ]
-
-            st.caption(
-                "💡 **Tips for best results:**\n"
-                "- Use **SerpApi** key for much better site:linkedin.com results\n"
-                "- Use **Deep mode** for 50+ profiles\n"
-                "- Results are LinkedIn profile URLs — click to view profiles\n"
-                "- Refine with more specific job titles in the box above"
-            )
-
-# ── KEYWORD EXPANSION ───────────────────────────────────────────────────────
-_current_prompt = prompt.strip() or st.session_state.get("prompt_value", "")
-if _current_prompt and len(_current_prompt) > 10:
-    with st.expander("🔍 Keyword Expansion — widen your search", expanded=False):
-        st.caption(
-            "The agent suggests related terms to find more results. "
-            "Select the ones you want to add to your search."
-        )
-        if st.button("💡 Suggest keywords", key="expand_btn"):
-            st.session_state["show_expansions"] = True
-
-        if st.session_state.get("show_expansions"):
-            with st.spinner("Generating keyword suggestions..."):
-                from core.task_parser import parse_task_prompt as _parse_tmp
-                _tmp_task = _parse_tmp(_current_prompt)
-                _llm_tmp  = FreeLLMClient(
-                    groq_api_key=st.session_state.get("groq_input",""),
-                    gemini_api_key=st.session_state.get("gemini_input",""),
-                )
-                _expansions = expand_keywords(
-                    topic=_tmp_task.industry or _current_prompt,
-                    entity_type=(_tmp_task.target_entity_types or ["company"])[0],
-                    task_type=_tmp_task.task_type,
-                    geography=_tmp_task.geography.include_countries or [],
-                    llm=_llm_tmp,
-                )
-
-            _selected_extra: list = []
-            _all_cats = {
-                "🔄 Synonyms":        _expansions.get("synonyms", []),
-                "⚙️ Sub-sectors":     _expansions.get("sub_sectors", []),
-                "🏢 Company types":   _expansions.get("company_types", []),
-                "👤 Job titles":      _expansions.get("job_variants", []),
-                "🌍 Geo variants":    _expansions.get("geo_variants", []),
-                "📋 Industry codes":  _expansions.get("industry_codes", []),
-            }
-            for cat_idx, (cat_label, terms) in enumerate(_all_cats.items()):
-                if terms:
-                    st.write(f"**{cat_label}**")
-                    cols = st.columns(min(4, len(terms)))
-                    for i, term in enumerate(terms):
-                        # Key = category_index + term_index → always unique
-                        _key = f"kw_c{cat_idx}_t{i}"
-                        if cols[i % len(cols)].checkbox(term, key=_key):
-                            _selected_extra.append(term)
-
-            st.session_state["selected_expansions"] = _selected_extra
-
-            if _selected_extra:
-                st.success(
-                    f"✅ {len(_selected_extra)} keywords selected — "
-                    f"will be added as extra search queries: "
-                    f"{', '.join(_selected_extra[:5])}{'...' if len(_selected_extra) > 5 else ''}"
-                )
-            else:
-                st.caption("☝️ Select keywords above to add them to your search.")
+run_btn = st.button("🚀 Run Search", type="primary", use_container_width=True, disabled=not prompt.strip())
 
 
-run_btn = st.button("🚀 Run Research Agent", type="primary", use_container_width=True)
+# ──────────────────────────────────────────────────────────────────────────────
+# Run search
+# ──────────────────────────────────────────────────────────────────────────────
+if run_btn and prompt.strip():
+    st.session_state["search_result"] = None
+    st.session_state["task_meta"] = None
+    st.session_state["paper_summaries"] = []
+    st.session_state["summaries_topic"] = ""
+    st.session_state["active_section"] = "results"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Run
-# ─────────────────────────────────────────────────────────────────────────────
-if run_btn:
-    if not prompt.strip():
-        st.warning("Please enter a research request.")
-        st.stop()
+    clean_prompt = _dedupe_repeated_prompt(prompt)
 
-    # Build LLM client (free first)
-    llm_client = FreeLLMClient(
-        groq_api_key       = groq_key,
-        gemini_api_key     = gemini_key,
-        openrouter_api_key = openrouter_key,
-        anthropic_api_key  = anthropic_key,
-        openai_api_key     = openai_key,
-    )
-    backends = llm_client.available_backends()
-    if backends:
-        st.success(f"🤖 LLM active: {', '.join(backends)}")
-    else:
-        st.warning(
-            "⚠️ No LLM key provided — running in keyword-only mode. "
-            "Add a free Groq or Gemini key in the sidebar for much better results."
-        )
-
-    # Parse intent
     with st.spinner("🧠 Understanding your request..."):
-        task_spec = parse_task_prompt_llm_first(prompt, llm=llm_client)
+        task_spec = parse_task_prompt_llm_first(clean_prompt, llm=llm_client)
 
-    # Apply UI overrides
-    task_spec.mode        = mode
+    task_spec = _postprocess_task_spec_from_prompt(task_spec, clean_prompt)
+    task_spec.mode = mode
     task_spec.max_results = int(max_results)
 
-    # Wire people search job levels from session state
-    task_spec.job_levels = st.session_state.get("job_levels", ["engineer", "manager", "hr"])
-
-    # Wire keyword expansions — append to prompt so query planner picks them up
-    selected_expansions = st.session_state.get("selected_expansions", [])
-    if selected_expansions:
-        expansion_hint = " ".join(selected_expansions[:8])
-        task_spec.raw_prompt = f"{task_spec.raw_prompt} [{expansion_hint}]"
-        st.info(f"🔍 Adding {len(selected_expansions)} keyword(s): {', '.join(selected_expansions[:5])}")
-
-    # Strict geo: only when constraints exist
-    has_geo = bool(
-        task_spec.geography.include_countries
-        or task_spec.geography.exclude_countries
-        or task_spec.geography.exclude_presence_countries
-    )
-    task_spec.geography.strict_mode = has_geo
-
-    if task_override != "auto":
-        task_spec.task_type = task_override
-    if entity_override != "auto":
-        task_spec.target_entity_types = [entity_override]
-    if format_override != "auto":
-        task_spec.output.format = format_override
+    fmt_map = {
+        "Auto-detect from prompt": None,
+        "Excel (.xlsx)": "xlsx",
+        "CSV (.csv)": "csv",
+        "PDF (.pdf)": "pdf",
+    }
+    if fmt_map.get(export_fmt):
+        task_spec.output.format = fmt_map[export_fmt]
     task_spec.output.filename = _normalize_filename(export_filename, task_spec.output.format)
 
-    # Fields
     user_fields = []
-    if field_website:  user_fields.append("website")
-    if field_email:    user_fields.append("email")
-    if field_phone:    user_fields.append("phone")
-    if field_linkedin: user_fields.append("linkedin")
-    if field_hq:       user_fields.append("hq_country")
-    if field_presence: user_fields.append("presence_countries")
-    if field_summary:  user_fields.append("summary")
+    if field_website:
+        user_fields.append("website")
+    if field_email:
+        user_fields.append("email")
+    if field_phone:
+        user_fields.append("phone")
+    if field_linkedin:
+        user_fields.append("linkedin")
+    if field_hq:
+        user_fields.append("hq_country")
+    if field_summary:
+        user_fields.append("summary")
+
+    base_attrs = list(dict.fromkeys(list(getattr(task_spec, "target_attributes", []) or [])))
 
     if task_spec.task_type == "document_research":
-        task_spec.target_attributes = sorted(set(
-            ["website", "summary", "author"] + user_fields
-        ))
+        task_spec.target_attributes = sorted(set([
+            "website", "summary", "author", "authors", "year",
+            "publication_year", "published_date", "abstract"
+        ] + user_fields + base_attrs))
+    elif task_spec.task_type == "people_search":
+        task_spec.target_attributes = list(dict.fromkeys(["linkedin", "website"] + user_fields + base_attrs))
     else:
-        task_spec.target_attributes = user_fields or ["website", "email", "phone"]
+        default_attrs = user_fields or ["website", "email", "phone"]
+        geo_support_attrs = []
+        if getattr(task_spec.geography, "strict_mode", False):
+            geo_support_attrs.extend(["hq_country", "presence_countries", "summary"])
+        elif getattr(task_spec, "domain_keywords", None) or getattr(task_spec, "solution_keywords", None):
+            geo_support_attrs.append("summary")
+        task_spec.target_attributes = list(dict.fromkeys(base_attrs + default_attrs + geo_support_attrs))
 
-    # Auto-mode guidance
-    effective_mode = mode
-    if int(max_results) > 60 and mode == "Balanced":
-        effective_mode = "Deep"
-        st.info(
-            f"ℹ️ You requested {int(max_results)} results — agent automatically using **Deep** mode "
-            f"for maximum coverage (Balanced can only return ~30–60)."
+    if not task_spec.industry or len(task_spec.industry.strip()) < 2:
+        st.error(
+            "⚠️ Couldn't detect the topic. Try being more specific: "
+            "'Find oil and gas service companies...' or 'Find research papers about ESP...'"
         )
-    elif int(max_results) > 30 and mode == "Fast":
-        effective_mode = "Balanced"
-        st.info(
-            f"ℹ️ You requested {int(max_results)} results — agent automatically using **Balanced** mode "
-            f"(Fast can only return ~15–20)."
-        )
+        st.stop()
 
-    # Verify task before running
-    with st.expander("📋 What the agent understood — verify before running", expanded=True):
-        _show_task_banner(task_spec.to_dict())
-        if not task_spec.industry or len(task_spec.industry.strip()) < 2:
-            st.error(
-                "⚠️ Topic not detected. Rephrase to include the industry or subject, "
-                "e.g. 'oil and gas software', 'renewable energy', 'electrical submersible pump'."
-            )
-            st.stop()
+    geo = task_spec.geography
+    with st.container():
+        c1, c2, c3, c4 = st.columns(4)
+        c1.info(f"**Looking for:** {_humanize_task_type(task_spec.task_type)}")
+        c2.info(f"**Category:** {_humanize_target_category(getattr(task_spec, 'target_category', 'general'))}")
+        c3.info(f"**Industry:** {task_spec.industry}")
+        c4.info(f"**Target:** {max_results} results in {mode} mode")
+
+        if getattr(task_spec, "solution_keywords", None):
+            st.info(f"🧩 Solution keywords: {', '.join(task_spec.solution_keywords)}")
+        if getattr(task_spec, "domain_keywords", None):
+            st.info(f"🛢️ Domain keywords: {', '.join(task_spec.domain_keywords)}")
+        if getattr(task_spec, "commercial_intent", "general") != "general":
+            st.info(f"🤝 Commercial intent: {_humanize_commercial_intent(task_spec.commercial_intent)}")
+
+        if geo.include_countries:
+            st.info(f"🌍 Search in: {', '.join(_title_list(geo.include_countries))}")
+        if geo.exclude_presence_countries:
+            st.warning(f"🚫 Excluding presence in: {', '.join(_title_list(geo.exclude_presence_countries))}")
+        elif geo.exclude_countries:
+            st.warning(f"🚫 Excluding countries: {', '.join(_title_list(geo.exclude_countries))}")
+        if not geo.include_countries and not geo.exclude_countries and not geo.exclude_presence_countries:
+            st.info("🌐 No geography filter — searching globally")
 
     provider_settings = ProviderSettings(
-        use_ddg=use_ddg, use_exa=use_exa, use_tavily=use_tavily,
-        use_serpapi=use_serpapi, use_firecrawl=use_firecrawl,
+        use_ddg=True,
+        use_exa=bool(exa_key),
+        use_tavily=bool(tavily_key),
+        use_serpapi=bool(serpapi_key),
+        use_firecrawl=bool(firecrawl_key),
         use_llm_parser=bool(backends),
-        use_uploaded_seed_dedupe=use_seed_dedupe,
+        use_uploaded_seed_dedupe=uploaded_file is not None,
     )
 
-    budget_overrides = {
-        "max_total_search_calls": max_total_calls,
-        "max_ddg_calls":          max_ddg_calls,
-        "max_exa_calls":          max_exa_calls,
-        "max_tavily_calls":       max_tavily_calls,
-        "max_serpapi_calls":      max_serpapi_calls,
-        "max_pages_to_scrape":    max_pages,
-    }
-
     user_keys = {
-        "groq_api_key":       groq_key,
-        "gemini_api_key":     gemini_key,
+        "groq_api_key": groq_key,
+        "gemini_api_key": gemini_key,
         "openrouter_api_key": openrouter_key,
-        "exa_api_key":        exa_key,
-        "tavily_api_key":     tavily_key,
-        "serpapi_key":        serpapi_key,
-        "firecrawl_api_key":  firecrawl_key,
-        "anthropic_api_key":  anthropic_key,
-        "openai_api_key":     openai_key,
+        "exa_api_key": exa_key,
+        "tavily_api_key": tavily_key,
+        "serpapi_key": serpapi_key,
+        "firecrawl_api_key": firecrawl_key,
+        "anthropic_api_key": anthropic_key,
+        "openai_api_key": openai_key,
     }
 
-    # Progress
     progress_bar = st.progress(0, text="Starting...")
-    log_box      = st.empty()
-    STAGE_PCT    = {"DDG": 20, "Exa": 45, "Tavily": 65, "SerpApi": 75,
-                    "dedup": 85, "LLM re-rank": 92, "Accepted": 98}
+    status_box = st.empty()
+    STAGE_PCT = {"DDG": 20, "Exa": 45, "Tavily": 65, "SerpApi": 75, "dedup": 85, "LLM re-rank": 92, "Accepted": 98}
 
     def _progress(msg: str):
-        log_box.caption(f"⏳ {msg}")
+        status_box.caption(f"⏳ {msg}")
         for kw, pct in STAGE_PCT.items():
             if kw.lower() in msg.lower():
                 progress_bar.progress(pct, text=f"{kw}...")
                 break
 
     orchestrator = SearchOrchestrator()
-    uploaded_df  = _read_uploaded_file(uploaded_file)
+    uploaded_df = _read_file(uploaded_file)
 
-    with st.spinner(f"Running {mode} search..."):
+    with st.spinner(f"Searching ({mode} mode)..."):
         result = orchestrator.run_task(
             task_spec=task_spec,
             provider_settings=provider_settings,
             uploaded_df=uploaded_df,
-            budget_overrides=budget_overrides,
+            budget_overrides={},
             min_confidence_score=int(min_conf),
             user_keys=user_keys,
             progress_callback=_progress,
         )
 
     progress_bar.progress(100, text="Done!")
-    log_box.empty()
+    status_box.empty()
 
-    # Summary banner
-    total = result["total_found"]
-    raw   = result["raw_search_results"]
-    rej   = len(result.get("rejected_records", []))
-    b_used = result["budget"]
+    st.session_state["search_result"] = result
+    st.session_state["task_meta"] = {
+        "task_type": task_spec.task_type,
+        "raw_prompt": clean_prompt,
+        "industry": task_spec.industry,
+        "target_category": getattr(task_spec, "target_category", "general"),
+        "solution_keywords": list(getattr(task_spec, "solution_keywords", []) or []),
+        "domain_keywords": list(getattr(task_spec, "domain_keywords", []) or []),
+        "commercial_intent": getattr(task_spec, "commercial_intent", "general"),
+        "mode": mode,
+        "max_results": int(max_results),
+        "include_countries": list(task_spec.geography.include_countries or []),
+        "exclude_countries": list(task_spec.geography.exclude_countries or []),
+        "exclude_presence_countries": list(task_spec.geography.exclude_presence_countries or []),
+        "strict_mode": bool(task_spec.geography.strict_mode),
+        "target_attributes": list(task_spec.target_attributes or []),
+    }
+    st.session_state["summaries_topic"] = task_spec.industry or "research"
 
-    if total > 0:
-        if total < int(max_results) * 0.3 and int(max_results) > 20:
+    if result.get("total_found", 0) == 0:
+        st.error("No results found.")
+        hints = []
+        if not exa_key:
+            hints.append("add a free Exa key (exa.ai) in the sidebar")
+        if not tavily_key:
+            hints.append("add a free Tavily key (tavily.com)")
+        if mode == "Fast":
+            hints.append("switch to Balanced or Deep mode")
+        hints.append("try lowering the confidence score to 25 in Advanced options")
+        hints.append("rephrase your search to include the specific industry or topic")
+        if hints:
+            st.info("**To get results:**\n" + "\n".join(f"- {h}" for h in hints))
+        st.stop()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Render results from session state
+# ──────────────────────────────────────────────────────────────────────────────
+result = st.session_state.get("search_result")
+task_meta = st.session_state.get("task_meta")
+
+if result and task_meta:
+    raw = result.get("raw_search_results", 0)
+    rej = len(result.get("rejected_records", []))
+    b = result.get("budget", {})
+    all_records = result.get("records", []) or []
+    is_people = task_meta["task_type"] == "people_search"
+    is_papers = task_meta["task_type"] == "document_research"
+
+    refined_records, app_removed = _refine_company_records(all_records, task_meta)
+    records = all_records if (is_people or is_papers) else refined_records
+    total = len(records)
+
+    if (not is_people and not is_papers) and total == 0 and len(all_records) > 0:
+        if task_meta.get("include_countries") or task_meta.get("exclude_presence_countries") or task_meta.get("exclude_countries"):
             st.warning(
-                f"⚠️ {total} results accepted from {raw} raw. Target was {int(max_results)}. "
-                f"Try: **Deep** mode, more provider keys (Exa + Tavily + SerpApi), "
-                f"or lower the **Min confidence score**."
+                "All raw candidates were removed by the geography/vendor filter. "
+                "This is expected when the providers return generic global pages instead of Egypt-specific company evidence. "
+                "Use Balanced or Deep mode and enable Exa/Tavily/SerpApi for better Egypt-specific coverage."
             )
-        else:
-            st.success(f"✅ {total} results accepted out of {raw} raw results.")
+
+    st.markdown(
+        f'<div style="background:#0d2137;border:1px solid #1a4f7a;border-radius:10px;padding:16px 24px;margin:12px 0">'
+        f'<span style="font-size:20px;font-weight:600;color:#4fc3f7">✅ {total} results shown</span>'
+        f'<span style="color:#7b8099;font-size:13px;margin-left:16px">'
+        f'from {len(all_records)} accepted · {raw} raw · {rej} filtered out by backend · {b.get("total_search_calls_used", 0)} searches</span></div>',
+        unsafe_allow_html=True,
+    )
+    if app_removed:
+        st.caption(f"App-side refinement removed {app_removed} obvious non-company / non-vendor records from display and exports.")
+
+    df = pd.DataFrame(records)
+
+    if is_people:
+        show_cols = ["company_name", "job_title", "employer_name", "city", "linkedin_url", "linkedin_profile"]
+        col_rename = {
+            "company_name": "Name",
+            "job_title": "Job Title",
+            "employer_name": "Company",
+            "city": "Location",
+            "linkedin_url": "LinkedIn URL",
+            "linkedin_profile": "Profile Link",
+        }
+        show = [c for c in show_cols if c in df.columns]
+        df_display = df[show].copy() if show else pd.DataFrame()
+        df_display.columns = [col_rename.get(c, c) for c in show]
+    elif is_papers:
+        df_display = _normalize_paper_records(records)
     else:
-        st.error(
-            f"❌ No results accepted ({raw} raw, {rej} rejected).\n\n"
-            "**To get more results:**\n"
-            "- Switch to **Deep** mode (handles 100+ result requests)\n"
-            "- Add **Exa + Tavily** keys — together they add 3× more unique results\n"
-            "- Add **SerpApi** key for additional diversity\n"
-            "- Lower **Min confidence score** to 25\n"
-            "- Rephrase to be more specific about the industry/sub-sector"
-        )
+        show_cols = ["company_name", "website"]
+        if field_email:
+            show_cols.append("email")
+        if field_phone:
+            show_cols.append("phone")
+        if field_linkedin:
+            show_cols.append("linkedin_url")
+        if field_hq:
+            show_cols.append("hq_country")
+        if field_summary:
+            show_cols.append("description")
+        show_cols.append("confidence_score")
 
-    cols = st.columns(5)
-    cols[0].metric("✅ Accepted",     total)
-    cols[1].metric("❌ Rejected",     rej)
-    cols[2].metric("🔍 Raw results",  raw)
-    cols[3].metric("📞 Search calls", b_used["total_search_calls_used"])
-    cols[4].metric("📄 Pages scraped", b_used["pages_scraped_used"])
+        col_rename = {
+            "company_name": "Company",
+            "website": "Website",
+            "email": "Email",
+            "phone": "Phone",
+            "linkedin_url": "LinkedIn",
+            "hq_country": "HQ Country",
+            "description": "Description",
+            "confidence_score": "Score",
+        }
+        show = [c for c in show_cols if c in df.columns]
+        df_display = df[show].copy() if show else pd.DataFrame()
+        df_display.columns = [col_rename.get(c, c) for c in show]
+        if "Score" in df_display.columns:
+            df_display = df_display.sort_values("Score", ascending=False)
 
-    if result.get("llm_backends"):
-        st.caption(f"🤖 LLM used: {', '.join(result['llm_backends'])}")
-
-    # ── TABS + AUTO PAPER SUMMARY ───────────────────────────────────────────
-    _is_paper_search = task_spec.task_type == "document_research"
-    paper_records: list[CompanyRecord] = []
-    paper_display_df = pd.DataFrame()
-    paper_export_paths: dict[str, str] = {}
-    paper_summary_report = ""
-    paper_summary_error = ""
-    paper_summary_enabled = _is_paper_search and auto_summarize_papers
-
-    if _is_paper_search:
-        paper_records = [CompanyRecord(**r) for r in result.get("records", [])]
-        if paper_summary_enabled:
-            try:
-                from core.feynman_bridge import auto_summarize_and_export
-
-                summary_status = st.empty()
-                with st.spinner("🔬 Auto-summarizing papers and preparing research brief..."):
-                    def _paper_progress(msg: str):
-                        summary_status.caption(f"🔬 {msg}")
-
-                    paper_records, paper_summary_report, paper_export_paths = auto_summarize_and_export(
-                        papers=paper_records,
-                        topic=task_spec.industry or prompt,
-                        export_dir="outputs",
-                        export_pdf=export_summary_pdf,
-                        per_paper_limit=int(paper_summary_limit),
-                        synthesis_mode=paper_synthesis_mode,
-                        progress_callback=_paper_progress,
-                    )
-                summary_status.empty()
-                summary_engine = paper_export_paths.get("summary_engine", "built-in")
-                if summary_engine == "feynman":
-                    st.success(
-                        f"🧠 Automatic paper summaries ready · engine: Feynman · "
-                        f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} paper quick reviews generated"
-                    )
-                else:
-                    st.success(
-                        f"🧠 Automatic paper summaries ready · engine: built-in fallback · "
-                        f"{sum(1 for p in paper_records if getattr(p, "notes", ""))} paper quick reviews generated"
-                    )
-                if paper_export_paths.get("pdf_error"):
-                    st.warning(f"PDF note: {paper_export_paths['pdf_error']}")
-            except Exception as exc:
-                paper_summary_error = f"Automatic paper summarization failed: {exc}"
-                st.warning(paper_summary_error)
-
-        paper_display_df = _paper_rows_for_display(paper_records, result.get("records", []))
-        if "Confidence" in paper_display_df.columns:
-            paper_display_df = paper_display_df.sort_values("Confidence", ascending=False, na_position="last")
-
-    if _is_paper_search:
-        tab_accept, tab_summary, tab_download, tab_reject, tab_task, tab_log, tab_budget = st.tabs([
-            "✅ Results", "🧠 Auto Summary", "⬇️ Downloads", "❌ Rejected", "📋 Task", "📜 Log", "💰 Budget",
-        ])
+    if is_papers:
+        section_labels = {"results": f"📊 Results ({total})", "summaries": "📝 AI Summaries", "download": "⬇️ Download", "details": "🔍 Search Details"}
     else:
-        tab_accept, tab_reject, tab_task, tab_log, tab_budget = st.tabs([
-            "✅ Results", "❌ Rejected", "📋 Task", "📜 Log", "💰 Budget",
-        ])
-        tab_summary = None
-        tab_download = None
+        section_labels = {"results": f"📊 Results ({total})", "download": "⬇️ Download", "details": "🔍 Search Details"}
 
-    with tab_accept:
-        df = pd.DataFrame(result["records"])
-        if _is_paper_search:
-            if not paper_display_df.empty:
-                st.caption("For paper searches, the results below include the automatic AI summary for each paper.")
-                st.dataframe(paper_display_df, use_container_width=True, height=520)
-            else:
-                st.info("No paper records to display.")
-        elif not df.empty:
-            # Build display columns from what was requested
-            if task_spec.task_type == "people_search":
-                base = ["company_name", "job_title", "employer_name", "city",
-                        "linkedin_url", "linkedin_profile", "description",
-                        "confidence_score", "source_provider"]
-            else:
-                base = ["company_name", "website"]
-                if "email"    in (task_spec.target_attributes or []): base.append("email")
-                if "phone"    in (task_spec.target_attributes or []): base.append("phone")
-                if "linkedin" in (task_spec.target_attributes or []): base.append("linkedin_url")
-                if "hq_country" in (task_spec.target_attributes or []): base.append("hq_country")
-                if "author" in (task_spec.target_attributes or []):   base += ["authors", "doi"]
-                if "summary" in (task_spec.target_attributes or []):  base.append("description")
-                base += ["confidence_score", "source_provider"]
+    section_options = list(section_labels.keys())
+    if st.session_state.get("active_section") not in section_options:
+        st.session_state["active_section"] = section_options[0]
 
-            seen_cols: set = set()
-            show_cols = []
-            for c in base:
-                if c in df.columns and c not in seen_cols:
-                    seen_cols.add(c)
-                    show_cols.append(c)
+    selected_section = st.radio("View", options=section_options, horizontal=True, key="active_section", format_func=lambda x: section_labels[x])
 
-            sort_col = "confidence_score" if "confidence_score" in show_cols else None
-            display_df = df[show_cols]
-            if sort_col:
-                display_df = display_df.sort_values(sort_col, ascending=False)
-            st.dataframe(display_df, use_container_width=True, height=520)
+    if selected_section == "results":
+        if is_people:
+            st.markdown(f"**{total} LinkedIn profiles found**")
+            for _, row in df_display.head(total).iterrows():
+                name = row.get("Name", "")
+                title = row.get("Job Title", "")
+                company = row.get("Company", "")
+                loc = row.get("Location", "")
+                url = row.get("LinkedIn URL", "") or row.get("Profile Link", "")
+                meta = " · ".join([p for p in [title, company, loc] if p])
+                link_html = f'<a href="{url}" target="_blank" class="result-link">🔗 View Profile</a>' if url else ""
+                st.markdown(
+                    f'<div class="result-card"><div class="result-name">👤 {name}</div><div class="result-meta">{meta}</div>{link_html}</div>',
+                    unsafe_allow_html=True,
+                )
+        elif is_papers:
+            st.markdown(f"**{total} papers found**")
+            for _, row in df_display.iterrows():
+                title = row.get("Title", "")
+                authors = row.get("Authors", "")
+                year = row.get("Year", "")
+                url = row.get("URL", "")
+                abstract = str(row.get("Abstract", ""))[:250]
+                meta_parts = [p for p in [str(authors)[:120], str(year)] if p and p != "nan"]
+                meta = " · ".join(meta_parts)
+                link_html = f'<a href="{url}" target="_blank" class="result-link">🔗 View Paper</a>' if url else ""
+                st.markdown(
+                    f'<div class="result-card"><div class="result-name">📄 {title}</div><div class="result-meta">{meta}</div><div style="font-size:12px;color:#5a6080;margin:6px 0">{abstract}{"..." if len(abstract) == 250 else ""}</div>{link_html}</div>',
+                    unsafe_allow_html=True,
+                )
         else:
-            st.info("No accepted results. Check the Rejected tab.")
+            st.dataframe(
+                df_display,
+                use_container_width=True,
+                height=min(600, 80 + len(df_display) * 40),
+                column_config={
+                    "Website": st.column_config.LinkColumn("Website"),
+                    "LinkedIn": st.column_config.LinkColumn("LinkedIn"),
+                    "Email": st.column_config.TextColumn("Email"),
+                    "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100),
+                },
+            )
 
-        ep = result.get("export_path", "")
-        if (not _is_paper_search) and ep and Path(ep).exists():
-            with open(ep, "rb") as f:
-                st.download_button(
-                    label=f"⬇️ Download {Path(ep).name}",
-                    data=f, file_name=Path(ep).name,
-                    mime="application/octet-stream",
-                )
-
-    if tab_summary is not None:
-        with tab_summary:
-            st.markdown("### 🧠 Automatic Paper Summary")
-            if paper_summary_error:
-                st.warning(paper_summary_error)
-            elif not paper_summary_enabled:
-                st.info("Automatic paper summarization is disabled in Advanced overrides.")
-            else:
-                if paper_export_paths.get("pdf"):
-                    st.success("PDF research brief is ready to download.")
-                elif paper_export_paths.get("markdown"):
-                    st.info("Markdown research brief is ready. PDF was not created.")
-
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Papers found", len(paper_records))
-                c2.metric("Quick reviews ready", sum(1 for p in paper_records if getattr(p, "notes", "")))
-                c3.metric("PDF ready", "Yes" if paper_export_paths.get("pdf") else "No")
-
-                if paper_summary_report:
-                    st.markdown("#### Combined topic synthesis")
-                    st.markdown(paper_summary_report)
-                elif not paper_records:
-                    st.info("No papers found to summarize.")
-                else:
-                    st.info("Per-paper summaries are attached to the results table. Combined synthesis was not generated.")
-
-                if not paper_display_df.empty:
-                    with st.expander("Paper summaries table", expanded=False):
-                        st.dataframe(
-                            paper_display_df[[c for c in ["Title", "Authors", "Year", "AI Summary"] if c in paper_display_df.columns]],
-                            use_container_width=True,
-                            height=420,
-                        )
-
-    if tab_download is not None:
-        with tab_download:
-            st.markdown("### ⬇️ Download paper outputs")
-            st.caption("For paper searches, downloads include the AI-enriched paper table and the combined research brief.")
-
-            dl_col1, dl_col2, dl_col3, dl_col4, dl_col5 = st.columns(5)
-            export_df = paper_display_df.copy() if not paper_display_df.empty else pd.DataFrame()
-
-            if not export_df.empty:
-                try:
-                    import io
-                    import openpyxl  # noqa: F401
-                    xl_buf = io.BytesIO()
-                    export_df.to_excel(xl_buf, index=False, engine="openpyxl")
-                    xl_buf.seek(0)
-                    dl_col1.download_button(
-                        "📊 Excel (.xlsx)",
-                        data=xl_buf,
-                        file_name=_normalize_filename(export_filename, "xlsx"),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+    elif selected_section == "summaries":
+        st.markdown("### 📝 Paper Summaries")
+        st.caption("One plain-English summary per paper — what it found and why it matters.")
+        if not backends:
+            st.warning("⚠️ Add a free Groq or Gemini key in the sidebar to enable summaries.")
+        else:
+            summary_candidates: list[CompanyRecord] = []
+            for r in records:
+                description = _first_nonempty(r, ["description", "abstract", "summary", "snippet", "paper_abstract"])
+                if not description.strip():
+                    continue
+                summary_candidates.append(
+                    CompanyRecord(
+                        company_name=_first_nonempty(r, ["company_name", "title", "paper_title", "document_title", "name"]) or "Untitled",
+                        authors=_first_nonempty(r, ["authors", "author", "paper_authors", "creators", "creator"]),
+                        description=description,
+                        doi=_first_nonempty(r, ["doi"]),
+                        website=_first_nonempty(r, ["website", "url", "paper_url", "source_url", "link"]),
                     )
-                except Exception:
-                    dl_col1.caption("Excel export unavailable")
-
-                dl_col2.download_button(
-                    "📄 CSV (.csv)",
-                    data=export_df.to_csv(index=False).encode("utf-8"),
-                    file_name=_normalize_filename(export_filename, "csv"),
-                    mime="text/csv",
-                    use_container_width=True,
                 )
-                dl_col3.download_button(
-                    "🔧 JSON (.json)",
-                    data=export_df.to_json(orient="records", indent=2).encode("utf-8"),
-                    file_name=_normalize_filename(export_filename, "json"),
-                    mime="application/json",
-                    use_container_width=True,
-                )
-            else:
-                dl_col1.caption("No tabular paper results")
-                dl_col2.caption("")
-                dl_col3.caption("")
+            summary_topic = task_meta.get("industry") or "the topic"
+            st.info(f"**{len(summary_candidates)} papers** ready — click to generate summaries.")
+            if st.button("🤖 Generate Summaries", key="gen_summaries", type="primary"):
+                status_holder = st.empty()
 
-            md_bytes = _file_bytes(paper_export_paths.get("markdown", ""))
-            if md_bytes:
-                dl_col4.download_button(
-                    "📝 Summary (.md)",
-                    data=md_bytes,
-                    file_name=Path(paper_export_paths["markdown"]).name,
-                    mime="text/markdown",
-                    use_container_width=True,
-                )
-            else:
-                dl_col4.caption("No markdown summary")
+                def _summary_progress(msg: str):
+                    status_holder.caption(f"⏳ {msg}")
 
-            pdf_bytes = _file_bytes(paper_export_paths.get("pdf", ""))
+                summaries = summarize_papers(
+                    papers=summary_candidates,
+                    topic=summary_topic,
+                    llm=llm_client,
+                    max_papers=20,
+                    progress_callback=_summary_progress,
+                )
+                st.session_state["paper_summaries"] = summaries
+                st.session_state["summaries_topic"] = summary_topic
+                status_holder.empty()
+                st.success(f"✅ {len(summaries)} summaries ready — see below and download.")
+                st.rerun()
+
+        if st.session_state.get("paper_summaries"):
+            summaries = st.session_state["paper_summaries"]
+            topic = st.session_state.get("summaries_topic", "research")
+            for i, s in enumerate(summaries, 1):
+                with st.expander(f"📄 {i}. {s['title'][:75]}", expanded=(i == 1)):
+                    meta = []
+                    if s.get("authors"):
+                        meta.append(f"👤 {s['authors']}")
+                    if s.get("doi"):
+                        meta.append(f"🔗 {s['doi'][:80]}")
+                    if meta:
+                        st.caption("  ·  ".join(meta))
+                    st.markdown(s["summary"])
+
+            txt_bytes = summaries_to_text(summaries, topic).encode("utf-8")
+            pdf_bytes = summaries_to_pdf_bytes(summaries, topic)
+            fn = topic[:30].replace(" ", "_")
+            st.divider()
+            st.markdown("**⬇️ Download all summaries:**")
+            c1, c2 = st.columns(2)
             if pdf_bytes:
-                dl_col5.download_button(
-                    "📑 PDF brief",
-                    data=pdf_bytes,
-                    file_name=Path(paper_export_paths["pdf"]).name,
-                    mime="application/pdf",
-                    use_container_width=True,
-                )
+                c1.download_button("📑 PDF", data=pdf_bytes, file_name=f"summaries_{fn}.pdf", mime="application/pdf", use_container_width=True)
             else:
-                dl_col5.caption("PDF not ready")
+                c1.warning("Install reportlab to enable PDF summaries.")
+            c2.download_button("📄 Text (.txt)", data=txt_bytes, file_name=f"summaries_{fn}.txt", mime="text/plain", use_container_width=True)
 
-            if paper_export_paths.get("pdf_error"):
-                st.warning(f"PDF export note: {paper_export_paths['pdf_error']}")
-
-            if not export_df.empty:
-                st.divider()
-                st.markdown("**Preview of the AI-enriched download:**")
-                st.dataframe(export_df.head(5), use_container_width=True)
-                st.caption(f"Showing first 5 of {len(export_df)} rows.")
-
-    with tab_reject:
-        rdf = pd.DataFrame(result.get("rejected_records", []))
-        if not rdf.empty:
-            if "notes" in rdf.columns:
-                rdf["reject_reason"] = (
-                    rdf["notes"].astype(str)
-                    .str.extract(r"rejected:([^\|]+)", expand=False)
-                    .str.strip()
-                )
-            show_cols = [c for c in [
-                "company_name","website","hq_country",
-                "confidence_score","reject_reason","notes",
-            ] if c in rdf.columns]
-            st.dataframe(rdf[show_cols], use_container_width=True, height=400)
-
-            if "reject_reason" in rdf.columns:
-                EXPLAIN = {
-                    "low_confidence":     "Score below threshold — irrelevant or low-quality page",
-                    "directory_or_media": "It's a directory/list/news article, not a real company",
-                    "geography_violation":"Company confirmed to be in an excluded country",
-                    "duplicate":          "Already found from another source",
-                }
-                bd = rdf["reject_reason"].value_counts().reset_index()
-                bd.columns = ["reason","count"]
-                st.subheader("Rejection breakdown")
-                for _, row in bd.iterrows():
-                    key     = row["reason"].split("(")[0].strip()
-                    explain = EXPLAIN.get(key, "")
-                    st.write(f"• **{row['reason']}** ({row['count']}) — {explain}")
+    elif selected_section == "download":
+        st.markdown("### ⬇️ Download your results")
+        st.caption("Downloads are generated from the cleaned table shown in the app.")
+        try:
+            xl_buf = io.BytesIO()
+            df_display.to_excel(xl_buf, index=False, engine="openpyxl")
+            xl_bytes = xl_buf.getvalue()
+        except Exception:
+            xl_bytes = None
+        csv_bytes = df_display.to_csv(index=False).encode("utf-8")
+        pdf_bytes = _df_to_pdf_bytes(df_display, title=f"Search Results - {task_meta.get('industry', 'Results')}", is_papers=is_papers)
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
+        if xl_bytes:
+            dl_col1.download_button(
+                "📊 Excel (.xlsx)",
+                data=xl_bytes,
+                file_name=_normalize_filename(export_filename, "xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        dl_col2.download_button("📄 CSV (.csv)", data=csv_bytes, file_name=_normalize_filename(export_filename, "csv"), mime="text/csv", use_container_width=True)
+        if pdf_bytes:
+            dl_col3.download_button("📑 PDF", data=pdf_bytes, file_name=_normalize_filename(export_filename, "pdf"), mime="application/pdf", use_container_width=True)
         else:
-            st.info("No rejected records.")
+            dl_col3.warning("Install reportlab to enable PDF export.")
+        st.divider()
+        st.dataframe(df_display.head(5), use_container_width=True)
+        st.caption(f"Preview: first 5 of {len(df_display)} rows.")
 
-    with tab_task:
-        _show_task_banner(result["task_spec"])
-        with st.expander("Full task JSON"):    st.json(result["task_spec"])
-        with st.expander("Execution plan"):   st.json(result["execution_plan"])
-        with st.expander("Generated queries"): st.json(result["queries"])
+    elif selected_section == "details":
+        st.markdown("### 🔍 Search details")
+        st.caption("Technical details about how the search ran.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Results shown", total)
+        c2.metric("Accepted before app refine", len(all_records))
+        c3.metric("Raw candidates", raw)
+        c4.metric("Searches made", b.get("total_search_calls_used", 0))
 
-    with tab_log:
-        for log in result["logs"]:
-            if any(w in log.lower() for w in ["error","failed","exception"]):
-                st.warning(f"⚠️ {log}")
-            elif any(w in log for w in ["Stage","LLM","Accepted","Strategy"]):
-                st.info(f"ℹ️ {log}")
-            else:
-                st.write(f"— {log}")
+        if backends:
+            st.info(f"🤖 AI backends used: {', '.join(backends)}")
+        else:
+            st.warning("No LLM backend — running without AI ranking. Add a Groq or Gemini key for better results.")
 
-    with tab_budget:
-        b = result["budget"]
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total calls",    f"{b['total_search_calls_used']}/{b['max_total_search_calls']}")
-        c2.metric("DDG",            f"{b['ddg_calls_used']}/{b['max_ddg_calls']}")
-        c3.metric("Exa",            f"{b['exa_calls_used']}/{b['max_exa_calls']}")
-        c4.metric("Tavily",         f"{b['tavily_calls_used']}/{b['max_tavily_calls']}")
-        c5.metric("SerpApi",        f"{b['serpapi_calls_used']}/{b['max_serpapi_calls']}")
+        with st.expander("What the agent understood from your prompt", expanded=True):
+            st.markdown(f"- **Task type:** {_humanize_task_type(task_meta.get('task_type', ''))}")
+            st.markdown(f"- **Category:** {_humanize_target_category(task_meta.get('target_category', 'general'))}")
+            st.markdown(f"- **Topic / industry:** {task_meta.get('industry', '')}")
+            if task_meta.get("solution_keywords"):
+                st.markdown(f"- **Solution keywords:** {', '.join(task_meta['solution_keywords'])}")
+            if task_meta.get("domain_keywords"):
+                st.markdown(f"- **Domain keywords:** {', '.join(task_meta['domain_keywords'])}")
+            st.markdown(f"- **Commercial intent:** {_humanize_commercial_intent(task_meta.get('commercial_intent', 'general'))}")
+            st.markdown(f"- **Mode:** {task_meta.get('mode', '')}")
+            if task_meta.get("include_countries"):
+                st.markdown(f"- **Search in:** {', '.join(_title_list(task_meta['include_countries']))}")
+            if task_meta.get("exclude_countries"):
+                st.markdown(f"- **Excluded countries:** {', '.join(_title_list(task_meta['exclude_countries']))}")
+            if task_meta.get("exclude_presence_countries"):
+                st.markdown(f"- **Excluded presence countries:** {', '.join(_title_list(task_meta['exclude_presence_countries']))}")
+            if task_meta.get("target_attributes"):
+                st.markdown(f"- **Requested fields:** {', '.join(task_meta['target_attributes'])}")
+            if task_meta.get("raw_prompt"):
+                st.code(task_meta["raw_prompt"], language="text")
+            if app_removed:
+                st.markdown(f"- **App-side refinement removed:** {app_removed} obvious non-company / non-vendor records")
 
-        c6, c7 = st.columns(2)
-        c6.metric("Pages scraped",  f"{b['pages_scraped_used']}/{b['max_pages_to_scrape']}")
-        c7.metric("Pages remaining", b["remaining_pages"])
+        with st.expander("Providers used"):
+            provider_used = []
+            if b.get("ddg_calls_used", 0) > 0:
+                provider_used.append(f"DuckDuckGo ({b['ddg_calls_used']} calls)")
+            if b.get("exa_calls_used", 0) > 0:
+                provider_used.append(f"Exa ({b['exa_calls_used']} calls)")
+            if b.get("tavily_calls_used", 0) > 0:
+                provider_used.append(f"Tavily ({b['tavily_calls_used']} calls)")
+            if b.get("serpapi_calls_used", 0) > 0:
+                provider_used.append(f"SerpApi ({b['serpapi_calls_used']} calls)")
+            for p in provider_used:
+                st.markdown(f"- {p}")
+            if not provider_used:
+                st.caption("No providers ran.")
 
-        with st.expander("API keys used (masked)"):
-            st.json(result.get("resolved_keys", {}))
-            st.caption("Keys are masked — never stored or logged.")
+
+st.divider()
+st.markdown(
+    '<p style="text-align:center;color:#3d4363;font-size:12px;font-family:IBM Plex Mono">'
+    'AI Research Agent · Powered by free APIs · No data stored'
+    '</p>',
+    unsafe_allow_html=True,
+)
