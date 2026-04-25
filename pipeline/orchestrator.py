@@ -26,6 +26,7 @@ from core.provider_resolver import resolve_provider_keys
 from core.query_builder import QueryBuilder
 from core.scoring import score_records
 from core.utils import extract_domain
+from core.geography import contains_country_or_city, humanize_country_name
 
 from providers.ddg_provider import DDGProvider
 from providers.exa_provider import ExaProvider
@@ -284,6 +285,8 @@ class SearchOrchestrator:
                 break
 
         _log(f"Accepted: {len(final_records)} | Rejected: {len(rejected_records)}")
+        if not final_records and task_spec.geography.strict_mode and task_spec.task_type not in {"people_search", "document_research"}:
+            _log("No verified records satisfied strict geography evidence. This is better than returning false positives.")
 
         if task_spec.task_type in {"entity_discovery", "entity_enrichment", "similar_entity_expansion"}:
             final_records = self._enrich_accepted_records(final_records, scraper, budget_manager, logs, task_spec)
@@ -842,6 +845,14 @@ class SearchOrchestrator:
         if self.company_index.contains_company(rec.company_name, rec.domain):
             return "duplicate"
 
+        # strict geography searches should not keep globally ambiguous company pages
+        if task_spec.geography.strict_mode and task_spec.task_type not in {"people_search", "document_research"}:
+            geo_known = bool((rec.hq_country or "").strip() or (rec.country or "").strip() or list(rec.presence_countries or []))
+            text_blob = " ".join([rec.company_name or "", rec.description or "", rec.notes or "", rec.website or "", rec.source_url or ""]).lower()
+            has_include_hint = any(contains_country_or_city(text_blob, c) for c in (task_spec.geography.include_countries or []))
+            if not geo_known and not has_include_hint:
+                return "missing_required_geography_evidence"
+
         return None
 
     def _violates_geography(self, rec: CompanyRecord, task_spec: TaskSpec) -> bool:
@@ -853,60 +864,53 @@ class SearchOrchestrator:
         rec_country = (rec.country or "").lower().strip()
         presence = [c.lower().strip() for c in (rec.presence_countries or [])]
         domain = (rec.domain or "").lower()
+        website = (rec.website or rec.source_url or "").lower()
+        evidence_text = " ".join([
+            rec.company_name or "", rec.description or "", rec.notes or "",
+            rec.website or "", rec.source_url or "", rec.contact_page or "", rec.email or "",
+        ]).lower()
+
+        def _known_match(country: str) -> bool:
+            if not country:
+                return False
+            if rec_hq == country or rec_country == country:
+                return True
+            if country in presence:
+                return True
+            if contains_country_or_city(evidence_text, country):
+                return True
+            if country == "egypt" and domain in KNOWN_EGYPT_DOMAINS:
+                return True
+            if country == "usa" and domain in KNOWN_USA_DOMAINS:
+                return True
+            if country == "egypt" and any(s in website for s in ["/egypt", "cairo", ".eg/"]):
+                return True
+            if country == "usa" and any(s in website for s in ["/us/", "/en-us/", "houston", "texas"]):
+                return True
+            return False
 
         if exclude_countries:
-            if rec_hq and rec_hq in exclude_countries:
-                return True
-            if rec_country and rec_country in exclude_countries:
-                return True
-
-            if "usa" in exclude_countries and domain in KNOWN_USA_DOMAINS:
-                return True
-            if "egypt" in exclude_countries and domain in KNOWN_EGYPT_DOMAINS:
-                return True
-
-            url_lower = (rec.website or rec.source_url or "").lower()
-            if "usa" in exclude_countries and not rec_hq and not rec_country:
-                if any(s in url_lower for s in ["/en-us/", "/us/en/", "/us-en/"]):
+            for c in exclude_countries:
+                if _known_match(c):
                     return True
-
-            if not rec_hq and not rec_country:
-                STRONG_HQ_PHRASES = {
-                    "usa": [
-                        "headquartered in the usa", "headquartered in the united states",
-                        "based in the us", "us-based company", "american company",
-                        ", texas", "abilene, tx", "houston, tx", "plano, tx",
-                        "the woodlands, tx",
-                    ],
-                    "egypt": [
-                        "headquartered in egypt", "based in egypt",
-                        "egyptian company", "cairo-based",
-                    ],
-                }
-                name_desc = f"{rec.company_name or ''} {rec.description or ''}".lower()
-                for c in exclude_countries:
-                    phrases = STRONG_HQ_PHRASES.get(c, [f"headquartered in {c}", f"based in {c}"])
-                    if any(p in name_desc for p in phrases):
-                        return True
 
         if exclude_presence:
-            if any(p in exclude_presence for p in presence):
-                return True
-            if "usa" in exclude_presence and rec.has_usa_presence:
-                return True
-            if "egypt" in exclude_presence and rec.has_egypt_presence:
-                return True
-
-        if include_countries and task_spec.geography.strict_mode:
-            known_geo = bool(rec_hq or rec_country or presence)
-            if known_geo:
-                matched = (
-                    (rec_hq and rec_hq in include_countries)
-                    or (rec_country and rec_country in include_countries)
-                    or any(p in include_countries for p in presence)
-                )
-                if not matched:
+            for c in exclude_presence:
+                if c in presence:
                     return True
+                if c == "usa" and rec.has_usa_presence:
+                    return True
+                if c == "egypt" and rec.has_egypt_presence:
+                    return True
+                # explicit presence-style text should reject for exclude_presence
+                if c and contains_country_or_city(evidence_text, c) and any(x in evidence_text for x in ["office", "branch", "presence", "operations", "مكتب", "فرع", "تواجد"]):
+                    return True
+
+        # strict include mode: for company/entity searches, require positive evidence instead of allowing global unknowns
+        if include_countries and task_spec.geography.strict_mode and task_spec.task_type != "people_search":
+            matched = any(_known_match(c) for c in include_countries)
+            if not matched:
+                return True
 
         return False
 
@@ -942,7 +946,7 @@ class SearchOrchestrator:
             optional_fields=optional,
             max_results=task_spec.max_results,
             mode=task_spec.mode,
-            language="en",
+            language=("ar" if re.search(r"[\u0600-\u06FF]", task_spec.raw_prompt or "") else "en"),
         )
 
     def _build_budget(
