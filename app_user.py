@@ -669,6 +669,15 @@ def _refine_company_records(records: list[dict], task_meta: dict) -> tuple[list[
         else:
             removed += 1
 
+    # Critical: do NOT fall back to the original records when strict geography
+    # or strict exclusion filters are active. Falling back reintroduces generic
+    # global hits and defeats the whole Egypt-only / exclude-country intent.
+    geo_strict = bool(task_meta.get("strict_mode")) or bool(task_meta.get("include_countries")) or bool(task_meta.get("exclude_presence_countries")) or bool(task_meta.get("exclude_countries"))
+    if geo_strict:
+        return refined, removed
+
+    # For fully global searches only, keep the old behavior so the UI does not
+    # go blank when the lightweight app-side validator is too strict.
     if not refined:
         return records or [], 0
     return refined, removed
@@ -1126,6 +1135,14 @@ if result and task_meta:
     refined_records, app_removed = _refine_company_records(all_records, task_meta)
     records = all_records if (is_people or is_papers) else refined_records
     total = len(records)
+
+    if (not is_people and not is_papers) and total == 0 and len(all_records) > 0:
+        if task_meta.get("include_countries") or task_meta.get("exclude_presence_countries") or task_meta.get("exclude_countries"):
+            st.warning(
+                "All raw candidates were removed by the geography/vendor filter. "
+                "This is expected when the providers return generic global pages instead of Egypt-specific company evidence. "
+                "Use Balanced or Deep mode and enable Exa/Tavily/SerpApi for better Egypt-specific coverage."
+            )
 
     st.markdown(
         f'<div style="background:#0d2137;border:1px solid #1a4f7a;border-radius:10px;padding:16px 24px;margin:12px 0">'
