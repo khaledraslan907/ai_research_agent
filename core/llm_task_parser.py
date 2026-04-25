@@ -1,19 +1,7 @@
-"""
-llm_task_parser.py
-==================
-LLM-powered intent parser with regex repair / merge.
-
-This version is stricter about geography and niche preservation:
-- keeps domain/service niches such as wireline, slickline, and well logging
-- understands don't/doesn't/can't phrasing for geography exclusions
-- treats operating/active/present-in exclusions as presence exclusions
-- preserves regex-extracted domain_keywords / solution_keywords / commercial_intent
-- requests geography evidence fields when geography filters are present
-- avoids collapsing specific niches to just "oil and gas" when the prompt is more specific
-"""
-
+"""LLM-first task parser with regex fallback and conservative merge."""
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, Optional
 
@@ -22,13 +10,23 @@ from core.prompt_templates import INTENT_PARSE_PROMPT
 from core.task_models import CredentialMode, GeographyRules, OutputSpec, TaskSpec
 from core.geography import normalize_country_name, expand_region_name
 
+GEO_ALIAS_MAP = {
+    "uk": "united kingdom",
+    "u.k.": "united kingdom",
+    "uae": "united arab emirates",
+    "u.a.e.": "united arab emirates",
+    "usa": "usa",
+    "u.s.a.": "usa",
+    "u.s.": "usa",
+    "us": "usa",
+}
+
 REGION_EXPANSIONS = {
     "europe": [
-        "france", "germany", "united kingdom", "italy", "spain", "netherlands", "belgium",
-        "switzerland", "norway", "sweden", "denmark", "finland", "poland", "austria",
-        "czech republic", "portugal", "romania", "greece", "ireland", "hungary", "ukraine",
-        "turkey", "serbia", "croatia", "bulgaria", "slovakia", "slovenia", "estonia",
-        "latvia", "lithuania", "luxembourg", "iceland",
+        "united kingdom", "france", "germany", "italy", "spain", "portugal", "netherlands", "belgium",
+        "switzerland", "austria", "norway", "sweden", "denmark", "finland", "poland", "czech republic",
+        "romania", "greece", "turkey", "hungary", "ukraine", "ireland", "serbia", "croatia",
+        "bulgaria", "slovakia", "slovenia", "estonia", "latvia", "lithuania", "luxembourg", "iceland",
     ],
     "middle east": ["saudi arabia", "united arab emirates", "qatar", "oman", "kuwait", "bahrain", "iraq", "jordan", "lebanon", "iran"],
     "north africa": ["egypt", "libya", "algeria", "tunisia", "morocco"],
@@ -36,36 +34,14 @@ REGION_EXPANSIONS = {
         "egypt", "libya", "algeria", "tunisia", "morocco", "saudi arabia", "united arab emirates",
         "qatar", "oman", "kuwait", "bahrain", "iraq", "jordan", "lebanon", "iran",
     ],
-    "asia": ["india", "china", "japan", "south korea", "singapore", "malaysia", "indonesia", "thailand", "vietnam", "philippines"],
-    "africa": ["south africa", "nigeria", "angola", "kenya", "ghana", "ethiopia", "egypt", "morocco", "algeria"],
-    "north america": ["united states", "canada", "mexico"],
-    "south america": ["brazil", "argentina", "chile", "colombia", "peru"],
-    "cis": ["russia", "kazakhstan", "azerbaijan", "ukraine"],
     "gcc": ["saudi arabia", "united arab emirates", "qatar", "oman", "kuwait", "bahrain"],
 }
 
-GEO_ALIAS_MAP = {
-    "uk": "united kingdom",
-    "u.k.": "united kingdom",
-    "uae": "united arab emirates",
-    "u.a.e.": "united arab emirates",
-    "usa": "united states",
-    "u.s.a.": "united states",
-    "u.s.": "united states",
-    "us": "united states",
-}
-
 _GENERIC_DOC_TOPICS = {
-    "petroleum", "petroleum engineering", "oil", "gas", "oil and gas", "oil & gas",
-    "energy", "engineering", "research", "papers", "paper", "study", "studies",
-    "article", "articles", "journal", "journals", "literature",
+    "petroleum", "petroleum engineering", "oil", "gas", "oil and gas", "oil & gas", "energy",
+    "engineering", "research", "papers", "paper", "study", "studies", "article", "articles", "journal",
+    "journals", "literature",
 }
-
-_DOC_TOPIC_PATTERNS = [
-    r"(?:find|search|show|get|give me|list)\s+(?:research\s+)?(?:papers?|articles?|studies?|publications?)\s+(?:about|on|regarding|for)\s+(.+)$",
-    r"(?:research\s+)?(?:papers?|articles?|studies?|publications?)\s+(?:about|on|regarding|for)\s+(.+)$",
-    r"(?:find|search|show|get|give me|list)\s+literature\s+(?:about|on|regarding|for)\s+(.+)$",
-]
 
 _OUTPUT_NOISE_PATTERNS = [
     r"\bwith\s+authors\b.*$",
@@ -82,37 +58,12 @@ _OUTPUT_NOISE_PATTERNS = [
     r"\bdownload\b.*$",
 ]
 
-_BROAD_DOMAIN_TAIL_RE = re.compile(
-    r"""
-    \s+
-    (?:in|within|for|related\ to|used\ in|applied\ to)
-    \s+
-    (?:the\s+)?
-    (?:
-        petroleum(?:\s+engineering)? |
-        oil(?:\s+and\s+gas|\s*&\s*gas)? |
-        gas |
-        energy |
-        upstream |
-        downstream
-    )
-    \b.*$
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-_DIGITAL_HINTS = (
-    "digital", "software", "platform", "platforms", "analytics", "automation",
-    "saas", "cloud", "ai", "artificial intelligence", "machine learning",
-    "data", "iot", "scada", "tech company", "technology company", "technology vendor",
-    "monitoring", "optimization", "optimisation",
-)
-
-_SERVICE_HINTS = (
-    "service company", "service companies", "contractor", "contractors", "oilfield services",
-    "engineering services", "wireline", "slickline", "well logging", "well intervention",
-    "coiled tubing", "cementing", "stimulation", "well testing",
-)
+_CATEGORY_NOISE_TERMS = {
+    "digital", "software", "technology", "tech", "analytics", "automation", "platform", "platforms", "saas",
+    "cloud", "ai", "artificial intelligence", "machine learning", "data", "iot", "scada", "monitoring",
+    "optimization", "optimisation", "company", "companies", "vendor", "vendors", "provider", "providers",
+    "service", "services", "contractor", "contractors",
+}
 
 _PRESENCE_PATTERNS = [
     r"\boperate(?:s|d|ing)?\s+outside\b",
@@ -127,28 +78,7 @@ _PRESENCE_PATTERNS = [
     r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
     r"\b(?:do(?:es)?\s+not|don't|doesn't)\s+(?:operate|work|serve|have|be\s+active|be\s+present)\b.*?\b(?:in|inside|within)\b",
     r"\bnot\s+(?:operating|working|serving|active|present)\b.*?\b(?:in|inside|within)\b",
-    r"\b(?:exclude|excluding|reject|remove|avoid)\b[^.\n;]{0,80}\b(?:presence|office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|operations?|legal entities?)\b",
 ]
-
-_CATEGORY_NOISE_TERMS = {
-    "digital", "software", "technology", "tech", "analytics", "automation", "platform",
-    "platforms", "saas", "cloud", "ai", "artificial intelligence", "machine learning",
-    "data", "iot", "scada", "monitoring", "optimization", "optimisation",
-    "company", "companies", "vendor", "vendors", "provider", "providers",
-    "service", "services", "contractor", "contractors",
-}
-
-
-def parse_with_llm(prompt: str, llm: FreeLLMClient) -> Optional[TaskSpec]:
-    if not llm.is_available():
-        return None
-
-    llm_prompt = INTENT_PARSE_PROMPT.format(prompt=prompt)
-    result = llm.generate_json(llm_prompt, timeout=30)
-    if not result or not isinstance(result, dict):
-        return None
-
-    return _dict_to_task_spec(prompt, result)
 
 
 def _norm_spaces(text: str) -> str:
@@ -159,14 +89,19 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
     out: list[str] = []
     seen = set()
     for item in items:
-        if not item:
+        s = str(item or "").strip()
+        if not s:
             continue
-        s = str(item).strip()
-        if not s or s in seen:
+        k = s.lower()
+        if k in seen:
             continue
-        seen.add(s)
+        seen.add(k)
         out.append(s)
     return out
+
+
+def _merge_keyword_lists(primary: list[str], secondary: list[str]) -> list[str]:
+    return _dedupe_keep_order(list(primary or []) + list(secondary or []))
 
 
 def _norm_country_value(value: str) -> str:
@@ -196,24 +131,19 @@ def _expand_countries(country_list: list[str]) -> list[str]:
         item_lower = str(item).lower().strip()
         if not item_lower:
             continue
-
         if item_lower in GEO_ALIAS_MAP:
             expanded.append(GEO_ALIAS_MAP[item_lower])
             continue
-
         if item_lower in REGION_EXPANSIONS:
             expanded.extend(REGION_EXPANSIONS[item_lower])
             continue
-
         region_exp = expand_region_name(item_lower)
         if region_exp:
             expanded.extend(region_exp)
             continue
-
         norm = normalize_country_name(item_lower)
         if norm:
             expanded.append(norm)
-
     return _norm_country_list(expanded)
 
 
@@ -224,11 +154,17 @@ def _strip_output_noise(text: str) -> str:
     return _norm_spaces(cleaned.strip(" -,:;|"))
 
 
-def _strip_broad_domain_tail(text: str) -> str:
-    cleaned = _norm_spaces(text)
-    cleaned = _BROAD_DOMAIN_TAIL_RE.sub("", cleaned)
-    cleaned = _norm_spaces(cleaned.strip(" -,:;|"))
-    return cleaned
+def _normalize_entity_topic(text: str) -> str:
+    text = _norm_spaces(text.lower())
+    text = re.sub(r"\boil\s*(?:&|and)?\s*gas\b", "oil and gas", text)
+    text = re.sub(r"\bpetroleum\b", "oil and gas", text)
+    for term in sorted(_CATEGORY_NOISE_TERMS, key=len, reverse=True):
+        text = re.sub(r"\b" + re.escape(term) + r"\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ,-./")
+    if "oil and gas" in text:
+        lead = re.sub(r"\boil and gas\b", " ", text).strip(" ,-./")
+        return f"{lead} oil and gas".strip() if lead else "oil and gas"
+    return text
 
 
 def _is_generic_document_topic(text: str) -> bool:
@@ -237,118 +173,19 @@ def _is_generic_document_topic(text: str) -> bool:
         return True
     if t in _GENERIC_DOC_TOPICS:
         return True
-
-    words = [
-        w for w in re.findall(r"[a-z0-9&+/.-]+", t)
-        if w not in {"the", "a", "an", "of", "in", "for", "on", "and", "to", "with", "about"}
-    ]
+    words = [w for w in re.findall(r"[a-z0-9&+/.-]+", t) if w not in {"the", "a", "an", "of", "in", "for", "on", "and", "to", "with", "about"}]
     if not words:
         return True
     return all(w in _GENERIC_DOC_TOPICS for w in words)
 
 
-def _extract_document_topic_from_prompt(raw_prompt: str) -> str:
-    prompt = _norm_spaces(raw_prompt)
-
-    for pattern in _DOC_TOPIC_PATTERNS:
-        m = re.search(pattern, prompt, flags=re.IGNORECASE)
-        if not m:
-            continue
-
-        candidate = m.group(1)
-        candidate = _strip_output_noise(candidate)
-        candidate = _strip_broad_domain_tail(candidate)
-        candidate = re.sub(r"^(?:the|a|an)\s+", "", candidate, flags=re.IGNORECASE)
-        candidate = _norm_spaces(candidate.strip(" .,:;|-"))
-
-        if candidate:
-            return candidate
-
-    quoted = re.findall(r"[\"“](.+?)[\"”]", prompt)
-    for q in quoted:
-        candidate = _strip_broad_domain_tail(_strip_output_noise(q))
-        if candidate and not _is_generic_document_topic(candidate):
-            return candidate
-
-    return ""
-
-
-def _normalize_entity_topic(text: str) -> str:
-    text = _norm_spaces(text.lower())
-    text = re.sub(r"\boil\s*(?:&|and)?\s*gas\b", "oil and gas", text)
-    text = re.sub(r"\boil\s+gas\b", "oil and gas", text)
-
-    removable = sorted(_CATEGORY_NOISE_TERMS, key=len, reverse=True)
-    for term in removable:
-        text = re.sub(r"\b" + re.escape(term) + r"\b", " ", text)
-
-    text = re.sub(r"\s+", " ", text).strip(" ,-")
-    if not text:
-        return ""
-
-    if re.search(r"\boil and gas\b", text):
-        lead = re.sub(r"\boil and gas\b", " ", text).strip(" ,-")
-        lead = re.sub(r"\s+", " ", lead).strip(" ,-")
-        return f"{lead} oil and gas".strip() if lead else "oil and gas"
-
-    return text
-
-
 def _looks_like_category_polluted_topic(text: str) -> bool:
     t = _norm_spaces(text.lower())
-    if not t:
-        return False
-    return any(term in t for term in _CATEGORY_NOISE_TERMS)
-
-
-def _repair_topic(raw_prompt: str, topic: str, task_type: str, regex_topic: str = "") -> str:
-    topic = _norm_spaces(topic)
-
-    if task_type == "document_research":
-        extracted = _extract_document_topic_from_prompt(raw_prompt)
-        if extracted:
-            if _is_generic_document_topic(topic):
-                return extracted
-            if topic and topic.lower() in extracted.lower() and len(extracted.split()) >= len(topic.split()):
-                return extracted
-        topic = _strip_broad_domain_tail(_strip_output_noise(topic))
-        return topic or extracted
-
-    if regex_topic:
-        regex_topic = _norm_spaces(regex_topic)
-        if not topic:
-            return regex_topic
-        if _looks_like_category_polluted_topic(topic):
-            normalized = _normalize_entity_topic(topic)
-            if normalized and regex_topic.lower() in normalized.lower():
-                return regex_topic
-            if normalized:
-                return normalized
-
-    return _normalize_entity_topic(topic) or regex_topic or topic
+    return bool(t and any(term in t for term in _CATEGORY_NOISE_TERMS))
 
 
 def _looks_like_presence_exclusion(prompt_lower: str) -> bool:
     return any(re.search(pat, prompt_lower) for pat in _PRESENCE_PATTERNS)
-
-
-def _merge_keyword_lists(primary: list[str], secondary: list[str]) -> list[str]:
-    return _dedupe_keep_order(list(primary or []) + list(secondary or []))
-
-
-def _finalize_topic(topic: str, regex_spec: Optional[TaskSpec], prompt_lower: str) -> str:
-    topic = _normalize_entity_topic(topic)
-    has_oil_gas = bool(re.search(r"\boil(?:\s+and\s+gas|\s*&\s*gas)\b", prompt_lower))
-    regex_domains = list(getattr(regex_spec, "domain_keywords", []) or []) if regex_spec else []
-    regex_solutions = list(getattr(regex_spec, "solution_keywords", []) or []) if regex_spec else []
-
-    if regex_domains and (not topic or topic == "oil and gas") and has_oil_gas:
-        return _normalize_entity_topic(" ".join(regex_domains[:4]) + " oil and gas")
-    if regex_solutions and (not topic or topic == "oil and gas") and has_oil_gas:
-        return _normalize_entity_topic(" ".join(regex_solutions[:3]) + " oil and gas")
-    if has_oil_gas and not topic:
-        return "oil and gas"
-    return topic
 
 
 def _clean_geography_with_regex(llm_geo: GeographyRules, regex_geo: GeographyRules) -> GeographyRules:
@@ -369,8 +206,7 @@ def _clean_geography_with_regex(llm_geo: GeographyRules, regex_geo: GeographyRul
     exclude_presence = _dedupe_keep_order(llm_exclude_presence + rx_exclude_presence)
 
     exclude_presence = [c for c in exclude_presence if c not in include]
-    exclude = [c for c in exclude if c not in include]
-    exclude = [c for c in exclude if c not in exclude_presence]
+    exclude = [c for c in exclude if c not in include and c not in exclude_presence]
 
     return GeographyRules(
         include_countries=include,
@@ -380,45 +216,68 @@ def _clean_geography_with_regex(llm_geo: GeographyRules, regex_geo: GeographyRul
     )
 
 
+def _repair_topic(raw_prompt: str, topic: str, task_type: str, regex_topic: str = "") -> str:
+    topic = _norm_spaces(topic)
+    if task_type == "document_research":
+        topic = _strip_output_noise(topic)
+        if _is_generic_document_topic(topic) and regex_topic:
+            return regex_topic
+        return topic or regex_topic or raw_prompt
+    if regex_topic:
+        regex_topic = _norm_spaces(regex_topic)
+        if not topic:
+            return regex_topic
+        if _looks_like_category_polluted_topic(topic):
+            normalized = _normalize_entity_topic(topic)
+            if normalized and regex_topic.lower() in normalized.lower():
+                return regex_topic
+            if normalized:
+                return normalized
+    return _normalize_entity_topic(topic) or regex_topic or topic
+
+
+def _finalize_topic(topic: str, regex_spec: TaskSpec, prompt_lower: str) -> str:
+    topic = _normalize_entity_topic(topic)
+    regex_topic = _norm_spaces(getattr(regex_spec, "industry", ""))
+    if regex_topic and topic and regex_topic.lower() in topic.lower():
+        topic = regex_topic
+    if regex_topic and not topic:
+        topic = regex_topic
+
+    domain_keywords = list(getattr(regex_spec, "domain_keywords", []) or [])
+    if (not topic or topic == "oil and gas") and domain_keywords:
+        if re.search(r"\boil and gas\b|\bpetroleum\b|نفط|غاز|بترول", prompt_lower):
+            return f"{' / '.join(domain_keywords[:4])} in oil and gas"
+        return " / ".join(domain_keywords[:4])
+    return topic or regex_topic or "general"
+
+
 def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Optional[TaskSpec] = None) -> TaskSpec:
     task_type = data.get("task_type", "entity_discovery")
-    if task_type not in {
-        "entity_discovery",
-        "entity_enrichment",
-        "similar_entity_expansion",
-        "market_research",
-        "document_research",
-        "people_search",
-    }:
+    if task_type not in {"entity_discovery", "entity_enrichment", "similar_entity_expansion", "market_research", "document_research", "people_search"}:
         task_type = "entity_discovery"
 
-    entity_type = data.get("entity_type", "company")
-    entity_category = data.get("entity_category", "general")
+    entity_type = data.get("entity_type", (regex_spec.target_entity_types[0] if regex_spec and regex_spec.target_entity_types else "company"))
+    entity_category = data.get("entity_category", getattr(regex_spec, "target_category", "general") if regex_spec else "general")
     if entity_category not in {"service_company", "software_company", "general"}:
         entity_category = "general"
 
     raw_topic = (data.get("topic") or "").strip()
     regex_topic = getattr(regex_spec, "industry", "") if regex_spec else ""
     topic = _repair_topic(raw_prompt, raw_topic, task_type, regex_topic=regex_topic)
-    prompt_lower = _norm_spaces(raw_prompt).lower()
-    topic = _finalize_topic(topic, regex_spec, prompt_lower)
 
-    include_raw = data.get("include_countries", []) or []
-    exclude_raw = data.get("exclude_countries", []) or []
-    excpres_raw = data.get("exclude_presence_countries", []) or []
-
-    include_countries = _expand_countries([c for c in include_raw if c])
-    exclude_countries = _expand_countries([c for c in exclude_raw if c])
-    excpres_countries = _expand_countries([c for c in excpres_raw if c])
-
+    include_countries = _expand_countries([c for c in (data.get("include_countries", []) or []) if c])
+    exclude_countries = _expand_countries([c for c in (data.get("exclude_countries", []) or []) if c])
+    excpres_countries = _expand_countries([c for c in (data.get("exclude_presence_countries", []) or []) if c])
     include_set = set(include_countries)
     exclude_countries = [c for c in exclude_countries if c not in include_set]
     excpres_countries = [c for c in excpres_countries if c not in include_set]
 
+    prompt_lower = _norm_spaces(raw_prompt).lower()
     if task_type in {"entity_discovery", "entity_enrichment", "similar_entity_expansion", "market_research"}:
-        if any(hint in prompt_lower for hint in _DIGITAL_HINTS):
+        if any(h in prompt_lower for h in ["digital", "software", "analytics", "ai", "cloud", "platform"]):
             entity_category = "software_company"
-        elif any(hint in prompt_lower for hint in _SERVICE_HINTS):
+        if any(h in prompt_lower for h in ["service", "contractor", "wireline", "slickline", "well logging", "خدمات", "مقاول"]):
             entity_category = "service_company"
 
     if _looks_like_presence_exclusion(prompt_lower) and exclude_countries and not excpres_countries:
@@ -431,15 +290,11 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
         exclude_presence_countries=excpres_countries,
         strict_mode=bool(include_countries or exclude_countries or excpres_countries),
     )
-
     if regex_spec:
         llm_geo = _clean_geography_with_regex(llm_geo, regex_spec.geography)
 
     attrs_raw = data.get("attributes_wanted", []) or []
-    valid_attrs = {
-        "website", "email", "phone", "linkedin", "summary", "hq_country",
-        "presence_countries", "pdf", "author", "authors", "doi", "abstract",
-    }
+    valid_attrs = {"website", "email", "phone", "linkedin", "summary", "hq_country", "presence_countries", "pdf", "author", "authors", "doi", "abstract"}
     attributes = [a for a in attrs_raw if a in valid_attrs]
     if not attributes and regex_spec:
         attributes = list(regex_spec.target_attributes or [])
@@ -453,7 +308,7 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
 
     solution_keywords = _merge_keyword_lists(llm_solution_keywords, list(getattr(regex_spec, "solution_keywords", []) or []))
     domain_keywords = _merge_keyword_lists(llm_domain_keywords, list(getattr(regex_spec, "domain_keywords", []) or []))
-    commercial_intent = data.get("commercial_intent") or getattr(regex_spec, "commercial_intent", "general") if regex_spec else "general"
+    commercial_intent = data.get("commercial_intent") or (getattr(regex_spec, "commercial_intent", "general") if regex_spec else "general")
 
     fmt = data.get("output_format", "xlsx")
     if fmt not in {"xlsx", "csv", "json", "pdf", "ui_table"}:
@@ -461,6 +316,7 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
 
     max_results = int(data.get("max_results", getattr(regex_spec, "max_results", 25) if regex_spec else 25))
     max_results = max(1, min(max_results, 500))
+    topic = _finalize_topic(topic, regex_spec or TaskSpec(), raw_prompt.lower())
 
     return TaskSpec(
         raw_prompt=raw_prompt,
@@ -473,10 +329,7 @@ def _dict_to_task_spec(raw_prompt: str, data: Dict[str, Any], regex_spec: Option
         commercial_intent=commercial_intent,
         target_attributes=attributes,
         geography=llm_geo,
-        output=OutputSpec(
-            format=fmt,
-            filename=f"results.{fmt if fmt != 'ui_table' else 'xlsx'}",
-        ),
+        output=OutputSpec(format=fmt, filename=f"results.{fmt if fmt != 'ui_table' else 'xlsx'}"),
         credential_mode=CredentialMode(mode="free"),
         use_local_llm=False,
         use_cloud_llm=False,
@@ -517,37 +370,37 @@ def _merge_llm_with_regex(prompt: str, llm_spec: TaskSpec, regex_spec: TaskSpec)
     rx_inc = _norm_country_list(list(getattr(regex_spec.geography, "include_countries", []) or []))
     if rx_inc:
         llm_spec.geography.include_countries = _norm_country_list(list(getattr(llm_spec.geography, "include_countries", []) or []) + rx_inc)
-        llm_spec.geography.exclude_countries = [
-            c for c in _norm_country_list(list(getattr(llm_spec.geography, "exclude_countries", []) or []))
-            if c not in rx_inc
-        ]
-        llm_spec.geography.exclude_presence_countries = [
-            c for c in _norm_country_list(list(getattr(llm_spec.geography, "exclude_presence_countries", []) or []))
-            if c not in rx_inc
-        ]
-        llm_spec.geography.strict_mode = bool(
-            llm_spec.geography.include_countries
-            or llm_spec.geography.exclude_countries
-            or llm_spec.geography.exclude_presence_countries
-        )
+        llm_spec.geography.exclude_countries = [c for c in _norm_country_list(list(getattr(llm_spec.geography, "exclude_countries", []) or [])) if c not in rx_inc]
+        llm_spec.geography.exclude_presence_countries = [c for c in _norm_country_list(list(getattr(llm_spec.geography, "exclude_presence_countries", []) or [])) if c not in rx_inc]
+        llm_spec.geography.strict_mode = bool(llm_spec.geography.include_countries or llm_spec.geography.exclude_countries or llm_spec.geography.exclude_presence_countries)
 
     if not getattr(llm_spec, "max_results", 0):
         llm_spec.max_results = regex_spec.max_results
-
     return llm_spec
 
 
-def parse_task_prompt_llm_first(
-    prompt: str,
-    llm: Optional[FreeLLMClient] = None,
-) -> TaskSpec:
+def parse_with_llm(prompt: str, llm: FreeLLMClient) -> Optional[TaskSpec]:
+    if not llm or not llm.is_available():
+        return None
+    llm_prompt = INTENT_PARSE_PROMPT.format(prompt=prompt)
+    result = llm.generate_json(llm_prompt, timeout=30)
+    if not result or not isinstance(result, dict):
+        return None
+
+    from core.task_parser import parse_task_prompt as _regex_parse
+    regex_spec = _regex_parse(prompt)
+    return _dict_to_task_spec(prompt, result, regex_spec=regex_spec)
+
+
+def parse_task_prompt_llm_first(prompt: str, llm: Optional[FreeLLMClient] = None) -> TaskSpec:
     from core.task_parser import parse_task_prompt as _regex_parse
 
     regex_spec = _regex_parse(prompt)
-
     if llm and llm.is_available():
-        result = parse_with_llm(prompt, llm)
-        if result:
-            return _merge_llm_with_regex(prompt, result, regex_spec)
-
+        try:
+            result = parse_with_llm(prompt, llm)
+            if result:
+                return _merge_llm_with_regex(prompt, result, regex_spec)
+        except Exception:
+            pass
     return regex_spec
