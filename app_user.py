@@ -37,6 +37,13 @@ except Exception:
         return None
 
 from pipeline.orchestrator import SearchOrchestrator
+from actions.compare import build_comparison_table
+from actions.cluster import cluster_records_by_field, cluster_records_by_keyword
+from actions.extract_contacts import extract_contacts_from_records
+from actions.extract_locations import extract_locations_from_records, summarize_geo_footprint
+from actions.extract_authors import extract_authors_from_records
+from actions.outreach_brief import build_outreach_brief
+from actions.summarize import summarize_records
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -326,6 +333,34 @@ def _humanize_commercial_intent(value: str) -> str:
         "reseller": "Reseller",
         "partner": "Partner / channel partner",
     }.get((value or "general").strip(), (value or "general").replace("_", " ").title())
+
+
+def _entity_type_from_task_meta(task_meta: dict) -> str:
+    task_type = str(task_meta.get("task_type", "") or "").strip().lower()
+    if task_type == "document_research":
+        return "paper"
+    if task_type == "people_search":
+        return "person"
+    return "company"
+
+
+def _safe_top_records(records: list[dict], top_n: int = 10) -> list[dict]:
+    rows = list(records or [])
+    try:
+        rows = sorted(rows, key=lambda r: float(r.get("confidence_score", 0) or 0), reverse=True)
+    except Exception:
+        pass
+    return rows[: max(1, int(top_n))]
+
+
+def _cluster_count_rows(cluster_map: dict) -> pd.DataFrame:
+    rows = []
+    for key, items in (cluster_map or {}).items():
+        rows.append({"Cluster": key, "Count": len(items or [])})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["Count", "Cluster"], ascending=[False, True])
+    return df
 
 
 _DIGITAL_CATEGORY_HINTS = (
@@ -1213,9 +1248,9 @@ if result and task_meta:
             df_display = df_display.sort_values("Score", ascending=False)
 
     if is_papers:
-        section_labels = {"results": f"📊 Results ({total})", "summaries": "📝 AI Summaries", "download": "⬇️ Download", "details": "🔍 Search Details"}
+        section_labels = {"results": f"📊 Results ({total})", "actions": "🧰 Actions", "summaries": "📝 AI Summaries", "download": "⬇️ Download", "details": "🔍 Search Details"}
     else:
-        section_labels = {"results": f"📊 Results ({total})", "download": "⬇️ Download", "details": "🔍 Search Details"}
+        section_labels = {"results": f"📊 Results ({total})", "actions": "🧰 Actions", "download": "⬇️ Download", "details": "🔍 Search Details"}
 
     section_options = list(section_labels.keys())
     if st.session_state.get("active_section") not in section_options:
@@ -1332,6 +1367,118 @@ if result and task_meta:
             else:
                 c1.warning("Install reportlab to enable PDF summaries.")
             c2.download_button("📄 Text (.txt)", data=txt_bytes, file_name=f"summaries_{fn}.txt", mime="text/plain", use_container_width=True)
+
+    elif selected_section == "actions":
+        st.markdown("### 🧰 Actions")
+        entity_type = _entity_type_from_task_meta(task_meta)
+        top_n = st.slider("Top records to use", 3, max(3, min(25, total if total else 3)), min(10, max(3, total if total else 3)), key="actions_top_n")
+        action_records = _safe_top_records(records, top_n=top_n)
+
+        if not action_records:
+            st.info("No records available for actions.")
+        else:
+            if entity_type == "paper":
+                action_tab1, action_tab2, action_tab3 = st.tabs(["Summaries", "Compare", "Authors"])
+                with action_tab1:
+                    summaries = summarize_records(action_records, entity_type="paper", llm=llm_client if backends else None, max_sentences=2)
+                    summary_df = pd.DataFrame({
+                        "Title": [r.get("company_name", "") for r in action_records],
+                        "Summary": summaries,
+                    })
+                    st.dataframe(summary_df, use_container_width=True, height=min(500, 80 + len(summary_df) * 40))
+                with action_tab2:
+                    cmp_fields = ["company_name", "authors", "publication_year", "doi", "website", "confidence_score"]
+                    cmp_df = build_comparison_table(action_records, fields=cmp_fields)
+                    st.dataframe(cmp_df, use_container_width=True, height=min(500, 80 + len(cmp_df) * 40))
+                with action_tab3:
+                    authors_rows = extract_authors_from_records(action_records)
+                    authors_df = pd.DataFrame([{
+                        "Title": x.get("title", ""),
+                        "Authors": ", ".join(x.get("authors", []) or []),
+                    } for x in authors_rows])
+                    st.dataframe(authors_df, use_container_width=True, height=min(500, 80 + len(authors_df) * 40))
+
+            elif entity_type == "person":
+                action_tab1, action_tab2, action_tab3 = st.tabs(["Summaries", "Compare", "Contacts / Profiles"])
+                with action_tab1:
+                    summaries = summarize_records(action_records, entity_type="person", llm=llm_client if backends else None, max_sentences=2)
+                    summary_df = pd.DataFrame({
+                        "Name": [r.get("company_name", "") for r in action_records],
+                        "Summary": summaries,
+                    })
+                    st.dataframe(summary_df, use_container_width=True, height=min(500, 80 + len(summary_df) * 40))
+                with action_tab2:
+                    cmp_fields = ["company_name", "job_title", "employer_name", "city", "linkedin_url", "confidence_score"]
+                    cmp_df = build_comparison_table(action_records, fields=cmp_fields)
+                    st.dataframe(cmp_df, use_container_width=True, height=min(500, 80 + len(cmp_df) * 40))
+                with action_tab3:
+                    contacts_df = pd.DataFrame(extract_contacts_from_records(action_records))
+                    st.dataframe(contacts_df, use_container_width=True, height=min(500, 80 + len(contacts_df) * 40))
+
+            else:
+                action_tab1, action_tab2, action_tab3, action_tab4, action_tab5, action_tab6 = st.tabs(["Summaries", "Compare", "Clusters", "Contacts", "Locations", "Outreach"])
+                with action_tab1:
+                    summaries = summarize_records(action_records, entity_type="company", llm=llm_client if backends else None, max_sentences=2)
+                    summary_df = pd.DataFrame({
+                        "Company": [r.get("company_name", "") for r in action_records],
+                        "Summary": summaries,
+                    })
+                    st.dataframe(summary_df, use_container_width=True, height=min(500, 80 + len(summary_df) * 40))
+                with action_tab2:
+                    available_fields = [
+                        "company_name", "website", "hq_country", "presence_countries", "email", "phone",
+                        "linkedin_url", "description", "source_provider", "confidence_score",
+                    ]
+                    compare_fields = st.multiselect(
+                        "Fields to compare",
+                        options=available_fields,
+                        default=["company_name", "website", "hq_country", "email", "phone", "confidence_score"],
+                        key="compare_fields_ms",
+                    )
+                    cmp_df = build_comparison_table(action_records, fields=compare_fields or available_fields[:6])
+                    st.dataframe(cmp_df, use_container_width=True, height=min(500, 80 + len(cmp_df) * 40))
+                with action_tab3:
+                    cluster_field = st.selectbox(
+                        "Cluster by field",
+                        options=["hq_country", "source_provider", "page_type", "presence_countries"],
+                        index=0,
+                        key="cluster_field_sb",
+                    )
+                    cluster_map = cluster_records_by_field(action_records, field=cluster_field)
+                    st.dataframe(_cluster_count_rows(cluster_map), use_container_width=True, height=280)
+                    action_keywords = list(task_meta.get("domain_keywords") or []) + list(task_meta.get("solution_keywords") or [])
+                    action_keywords = [str(x).strip() for x in action_keywords if str(x).strip()]
+                    if action_keywords:
+                        kw_cluster = cluster_records_by_keyword(action_records, action_keywords[:8])
+                        st.markdown("**Keyword clusters**")
+                        st.dataframe(_cluster_count_rows(kw_cluster), use_container_width=True, height=280)
+                with action_tab4:
+                    contacts_df = pd.DataFrame(extract_contacts_from_records(action_records))
+                    if contacts_df.empty:
+                        st.info("No contact signals extracted yet.")
+                    else:
+                        st.dataframe(contacts_df, use_container_width=True, height=min(500, 80 + len(contacts_df) * 40))
+                with action_tab5:
+                    loc_df = pd.DataFrame(extract_locations_from_records(action_records))
+                    geo_summary = summarize_geo_footprint(action_records)
+                    if geo_summary:
+                        st.markdown("**HQ footprint**")
+                        geo_df = pd.DataFrame([{"HQ Country": k, "Count": v} for k, v in geo_summary.items()]).sort_values("Count", ascending=False)
+                        st.dataframe(geo_df, use_container_width=True, height=min(280, 80 + len(geo_df) * 35))
+                    st.markdown("**Location details**")
+                    st.dataframe(loc_df, use_container_width=True, height=min(500, 80 + len(loc_df) * 40))
+                with action_tab6:
+                    target_market_default = ", ".join(task_meta.get("include_countries") or [])
+                    target_market = st.text_input("Target market", value=target_market_default, key="outreach_market_input")
+                    outreach_reason = st.text_area(
+                        "Outreach angle",
+                        value="Potential fit based on geography, niche relevance, and contactability.",
+                        key="outreach_reason_ta",
+                    )
+                    briefs = [build_outreach_brief(r, target_market=target_market, reason=outreach_reason) for r in action_records[:5]]
+                    for i, brief in enumerate(briefs, 1):
+                        with st.expander(f"Brief {i}", expanded=(i == 1)):
+                            st.code(brief, language="text")
 
     elif selected_section == "download":
         st.markdown("### ⬇️ Download your results")
