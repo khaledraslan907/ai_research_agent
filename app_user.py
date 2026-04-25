@@ -311,6 +311,19 @@ def _humanize_task_type(task_type: str) -> str:
     }.get(task_type, "🔍 Entities")
 
 
+
+
+def _humanize_entity_type(entity_type: str) -> str:
+    return {
+        "company": "🏢 Companies",
+        "paper": "📄 Papers",
+        "person": "👥 People",
+        "event": "🎪 Events",
+        "product": "🧰 Products",
+        "tender": "📑 Tenders",
+    }.get((entity_type or "").strip(), "🔍 Entities")
+
+
 def _humanize_target_category(category: str) -> str:
     return {
         "software_company": "Digital / software companies",
@@ -1015,7 +1028,12 @@ if run_btn and prompt.strip():
 
     base_attrs = list(dict.fromkeys(list(getattr(task_spec, "target_attributes", []) or [])))
 
-    if task_spec.task_type == "document_research":
+    entity_type = (getattr(task_spec, "target_entity_types", []) or ["company"])[0]
+
+    if entity_type == "tender" or task_spec.task_type == "market_research":
+        tender_defaults = ["website", "deadline", "buyer"]
+        task_spec.target_attributes = list(dict.fromkeys(base_attrs + user_fields + tender_defaults))
+    elif task_spec.task_type == "document_research":
         task_spec.target_attributes = sorted(set([
             "website", "summary", "author", "authors", "year",
             "publication_year", "published_date", "abstract"
@@ -1041,7 +1059,8 @@ if run_btn and prompt.strip():
     geo = task_spec.geography
     with st.container():
         c1, c2, c3, c4 = st.columns(4)
-        c1.info(f"**Looking for:** {_humanize_task_type(task_spec.task_type)}")
+        display_entity = _humanize_entity_type((getattr(task_spec, "target_entity_types", []) or ["company"])[0])
+        c1.info(f"**Looking for:** {display_entity}")
         c2.info(f"**Category:** {_humanize_target_category(getattr(task_spec, 'target_category', 'general'))}")
         c3.info(f"**Industry:** {task_spec.industry}")
         c4.info(f"**Target:** {max_results} results in {mode} mode")

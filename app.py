@@ -1,4 +1,3 @@
-"""Project entrypoint.
-Uses app_user.py as the final Streamlit interface template.
-"""
-from app_user import *  # noqa: F401,F403
+from pathlib import Path
+import runpy
+runpy.run_path(str(Path(__file__).with_name("app_user_tender.py")), run_name="__main__")
