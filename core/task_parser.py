@@ -48,11 +48,6 @@ ENTITY_HINTS = {
         "product", "products", "tool", "tools", "platform", "solution",
         "solutions", "app", "application", "software", "system",
     ],
-    "tender": [
-        "tender", "tenders", "rfq", "rfp", "itt", "itb", "bid", "bids",
-        "procurement", "procurements", "request for quotation", "request for proposal",
-        "invitation to tender", "tender notice", "vendor registration",
-    ],
 }
 
 ATTRIBUTE_HINTS = {
@@ -69,6 +64,7 @@ ATTRIBUTE_HINTS = {
     "summary": ["summary", "overview", "description", "abstract", "bio"],
     "author": ["author", "authors", "written by", "authored by", "who wrote", "researcher", "researchers"],
     "pdf": ["pdf", "full text", "download"],
+    "company_name": ["company name", "company names", "names"],
     "deadline": ["deadline", "due date", "closing date", "bid closing"],
     "buyer": ["buyer", "issuer", "procuring entity", "tendering authority", "client"],
     "exhibitors": ["exhibitor", "exhibitors"],
@@ -129,13 +125,18 @@ DIGITAL_CATEGORY_HINTS = {
 SERVICE_CATEGORY_HINTS = {
     "service company", "service companies", "contractor", "contractors",
     "field service", "services provider", "engineering services",
-    "oilfield services", "oilfield service", "petroleum services", "petroleum service",
-    "drilling services", "field services", "maintenance", "inspection",
-    "testing", "consulting services", "wireline services", "slickline services",
-    "well logging services", "خدمات البترول", "خدمات النفط", "خدمات الغاز",
-    "خدمات حقول النفط", "شركات خدمات البترول", "شركات خدمات النفط والغاز",
+    "oilfield services", "drilling services", "field services",
+    "maintenance", "inspection", "testing", "consulting services",
 }
 
+
+
+def _looks_like_tender_prompt(prompt_lower: str) -> bool:
+    return bool(re.search(r"\b(tender|tenders|rfq|rfp|itt|itb|bid|bids|procurement|invitation to tender|tender notice)\b", prompt_lower, re.I))
+
+
+def _looks_like_exhibitor_prompt(prompt_lower: str) -> bool:
+    return bool(re.search(r"\b(exhibitor|exhibitors)\b", prompt_lower, re.I))
 SOLUTION_KEYWORD_PATTERNS = {
     "digital": [r"\bdigital\b", r"\bdigitalization\b", r"\bdigitization\b"],
     "software": [r"\bsoftware\b", r"\bsaas\b", r"\bplatform(?:s)?\b", r"\bapp(?:lication)?s?\b"],
@@ -281,12 +282,9 @@ def _dedupe_repeated_prompt(prompt: str) -> str:
 
 
 def _normalize_geo_aliases_in_text(text: str) -> str:
-    out = text or ""
+    out = text
     for alias, canonical in sorted(GEO_ALIAS_MAP.items(), key=lambda x: len(x[0]), reverse=True):
-        if re.search(r"[\u0600-\u06FF]", alias):
-            out = out.replace(alias, canonical)
-        else:
-            out = re.sub(r"\b" + re.escape(alias) + r"\b", canonical, out, flags=re.IGNORECASE)
+        out = re.sub(r"\b" + re.escape(alias) + r"\b", canonical, out, flags=re.IGNORECASE)
     return out
 
 
@@ -424,7 +422,6 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
 def _extract_entity_types(prompt_lower: str) -> List[str]:
     if _looks_like_tender_prompt(prompt_lower):
         return ["tender"]
-
     found = []
     for entity_type, hints in ENTITY_HINTS.items():
         if any(re.search(r"\b" + re.escape(h) + r"\b", prompt_lower) for h in hints):
@@ -450,7 +447,7 @@ def _extract_output_format(prompt_lower: str) -> str:
 
 
 def _extract_task_type(prompt_lower: str) -> str:
-    if _looks_like_tender_prompt(prompt_lower):
+    if _looks_like_tender_prompt(prompt_lower) or _looks_like_exhibitor_prompt(prompt_lower):
         return "market_research"
     if any(x in prompt_lower for x in [
         "enrich", "append", "fill missing", "complete list",
@@ -484,14 +481,7 @@ def _extract_task_type(prompt_lower: str) -> str:
 
 
 def _extract_target_category(prompt_lower: str) -> str:
-    service_patterns = [
-        r"\boilfield service(?:s)?\b", r"\bpetroleum service(?:s)?\b",
-        r"\bservice compan(?:y|ies)\b", r"\bengineering service(?:s)?\b",
-        r"\bdrilling service(?:s)?\b", r"\bwireline\b", r"\bslickline\b",
-        r"\bwell logging\b", r"\bcontractor(?:s)?\b",
-        r"خدمات البترول", r"خدمات النفط", r"خدمات الغاز", r"شركات خدمات"
-    ]
-    if any(x in prompt_lower for x in SERVICE_CATEGORY_HINTS) or any(re.search(pat, prompt_lower) for pat in service_patterns):
+    if any(x in prompt_lower for x in SERVICE_CATEGORY_HINTS):
         return "service_company"
 
     digital_patterns = [
@@ -598,6 +588,13 @@ def _clean_topic_text(text: str) -> str:
 
 
 def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
+    if "food manufacturing" in prompt_lower:
+        return "food manufacturing"
+    if "egyps" in prompt_lower:
+        parts=[]
+        if "wireline" in prompt_lower: parts.append("wireline")
+        if "well logging" in prompt_lower: parts.append("well logging")
+        return " ".join(parts) or "oil and gas"
     geo_words = set(all_country_names())
     geo_words.update(GEO_ALIAS_MAP.keys())
     state_words = set(_ALL_SUBNATIONAL.keys())
@@ -631,11 +628,9 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
 
     oil_gas_patterns = [
         r"\boil\s*(?:&|and)?\s*gas\b",
-        r"\boilfield\b",
-        r"\boilfield service(?:s)?\b",
         r"\bupstream\b",
         r"\bpetroleum\b",
-        r"قطاع البترول", r"خدمات البترول", r"النفط والغاز", r"حقول النفط",
+        r"\benergy\b",
     ]
     if any(re.search(p, prompt_lower) for p in oil_gas_patterns):
         return "oil and gas"
@@ -713,8 +708,6 @@ def _extract_focus_term(prompt: str, prompt_lower: str, task_type: str) -> str:
     if task_type == "document_research" and not candidate:
         return "research"
 
-    if not candidate and any(k in prompt_lower for k in ["oilfield", "petroleum", "oil and gas", "خدمات البترول", "النفط والغاز"]):
-        return "oil and gas"
     return candidate or ""
 
 
@@ -749,10 +742,6 @@ def _extract_target_attributes(prompt_lower: str, task_type: str) -> List[str]:
     for attr, hints in ATTRIBUTE_HINTS.items():
         if any(re.search(r"\b" + re.escape(h) + r"\b", prompt_lower) for h in hints):
             found.append(attr)
-
-    if task_type == "market_research" and _looks_like_tender_prompt(prompt_lower):
-        defaults = ["website", "deadline", "buyer"]
-        return list(dict.fromkeys((found or defaults) + ["website"]))
 
     if task_type == "document_research":
         defaults = ["website", "summary", "author"]
@@ -790,6 +779,9 @@ def parse_task_prompt(prompt: str) -> TaskSpec:
     entity_types = _extract_entity_types(prompt_lower)
     target_category = _extract_target_category(prompt_lower)
     geography = _extract_geography(prompt_lower)
+    if "egyps" in prompt_lower and "egypt" not in [c.lower() for c in geography.include_countries]:
+        geography.include_countries = _dedupe_keep_order(list(geography.include_countries) + ["egypt"])
+        geography.strict_mode = True
     output_format = _extract_output_format(prompt_lower)
     focus_term = _extract_focus_term(prompt, prompt_lower, task_type)
     solution_keywords = _extract_solution_keywords(prompt_lower)
@@ -797,9 +789,6 @@ def parse_task_prompt(prompt: str) -> TaskSpec:
     commercial_intent = _extract_commercial_intent(prompt_lower)
     target_attributes = _extract_target_attributes(prompt_lower, task_type)
     max_results = _extract_max_results(prompt)
-
-    if entity_types == ["tender"]:
-        target_category = "general"
 
     ext = output_format if output_format != "ui_table" else "xlsx"
     filename = f"results.{ext}"

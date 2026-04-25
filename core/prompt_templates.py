@@ -17,7 +17,7 @@ Extract the search intent. Return ONLY this JSON (no markdown, no explanation):
   "include_countries": ["countries to search IN, empty if none"],
   "exclude_countries": ["countries to exclude by HQ / headquarters, empty if none"],
   "exclude_presence_countries": ["countries where company must NOT have offices / branches / subsidiaries / local entities / presence"],
-  "attributes_wanted": ["website","email","phone","linkedin","summary","hq_country","presence_countries","deadline","buyer","exhibitors"],
+  "attributes_wanted": ["website","email","phone","linkedin","summary","hq_country","presence_countries","company_name","deadline","buyer","exhibitors"],
   "output_format": "xlsx" | "csv" | "json" | "pdf",
   "max_results": <number, default 25>,
   "confidence": <0-100>
@@ -28,18 +28,6 @@ RULES:
 - NEVER put country names in topic
 - NEVER put contact/output words in topic
 - entity_category = "software_company" for digital/software/AI/analytics/automation/platform/SaaS vendors
-
-
-ADDITIONAL CATEGORY RULES:
-- entity_category = "service_company" for service/contractor/engineering/oilfield-service/petroleum-service requests
-- entity_category = "software_company" ONLY for digital/software/AI/analytics/automation/platform/SaaS vendors
-- If the request says "oilfield service companies", "petroleum service companies", "drilling contractors", "wireline companies", or Arabic phrases like "شركات خدمات البترول", it should be "service_company", NOT "software_company"
-
-CRITICAL RULES FOR solution_keywords and domain_keywords:
-- NEVER put generic category phrases into solution_keywords or domain_keywords
-- Examples of forbidden values: "oilfield service companies", "service companies", "software companies", "digital companies", "companies", "vendors"
-- "oilfield service" is a category/context phrase, not a solution keyword
-- Keep solution_keywords/domain_keywords empty unless a real technical niche is explicitly stated
 
 CRITICAL RULES FOR solution_keywords:
 - solution_keywords must contain ONLY technical phrases EXPLICITLY WRITTEN in the user's request
@@ -64,23 +52,31 @@ COMMERCIAL INTENT RULES:
 - commercial_intent = "partner" for partner/channel-partner intent
 
 GEOGRAPHY RULES:
-- For "Find service companies in Egypt working in oil and gas": topic = "oil and gas", entity_category = "service_company", include_countries = ["egypt"]
-- For "Find oilfield service companies in Egypt with website, email, and phone": topic = "oil and gas", entity_category = "service_company", include_countries = ["egypt"]
-- For "شركات خدمات البترول في مصر": topic = "oil and gas", entity_category = "service_company", include_countries = ["egypt"]
+- For "Find service companies in Egypt working in oil and gas": topic = "oil and gas", include_countries = ["egypt"]
 - For "Find papers about CCS in Europe": topic = "CCS", task_type = "document_research"
 - For "Find digital oil gas companies outside USA and Egypt with email": topic = "oil and gas", entity_category = "software_company"
 - For "companies that do not have offices in Egypt or the United States": use exclude_presence_countries, NOT include_countries
 - Phrases like "no offices in", "no branches in", "no subsidiaries in", "no local entities in", "exclude Egypt presence", "exclude USA presence", "operate outside" should map to exclude_presence_countries
 
-- If the user asks for tenders, RFQs, RFPs, ITTs, bids, procurement notices, or invitations to tender, entity_type = "tender" and task_type = "market_research"
-- For "Find tenders for pipeline inspection in GCC and extract deadline and buyer":
-  - entity_type = "tender"
+
+- For prompts like "Find software companies in food manufacturing in Germany with website and email":
+  - entity_category = "software_company"
+  - topic = "food manufacturing"
+  - do NOT put "website" or "email" in topic
+  - do NOT put the generic word "software" into solution_keywords unless the user explicitly asks for software features
+- For prompts like "Find EGYPS exhibitors related to wireline and well logging and extract company names and websites":
   - task_type = "market_research"
+  - entity_type = "company"
+  - topic = "wireline well logging"
+  - include_countries = ["egypt"] because EGYPS is Egypt Energy Show
+  - attributes_wanted includes "company_name" and "website"
+  - NEVER put "extract company names" or "websites" into topic
+- For prompts like "Find tenders for pipeline inspection in GCC and extract deadline and buyer":
+  - task_type = "market_research"
+  - entity_type = "tender"
   - topic = "pipeline inspection"
   - include_countries = GCC expansion
-  - attributes_wanted must include "deadline" and "buyer"
-- NEVER put action phrases like "extract deadline and buyer" into topic
-- NEVER classify tenders as companies unless the user explicitly asks for companies
+  - attributes_wanted includes "deadline" and "buyer"
 
 OUTPUT RULES:
 - output_format default is "xlsx" unless user says csv/json/pdf
