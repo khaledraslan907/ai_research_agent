@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.task_models import TaskSpec, ExecutionPlan
+from core.task_models import ExecutionPlan, TaskSpec
 
 
 def _n_solution_keywords(task: TaskSpec) -> int:
@@ -24,14 +24,16 @@ def build_execution_plan(task: TaskSpec, provider_settings=None) -> ExecutionPla
     n_keywords = _n_solution_keywords(task)
     n_domain = _n_domain_keywords(task)
     is_channel = _is_channel_search(task)
-    is_software = (getattr(task, "target_category", "general") or "general") == "software_company"
+    category = (getattr(task, "target_category", "general") or "general")
+    entity_types = [str(x).strip().lower() for x in (getattr(task, "target_entity_types", []) or ["company"])]
+    primary_entity = entity_types[0] if entity_types else "company"
 
     if max_r > 60 and mode == "balanced":
         mode = "deep"
     elif max_r > 30 and mode == "fast":
         mode = "balanced"
 
-    if mode == "fast" and (is_channel or (is_software and (n_keywords >= 3 or n_domain >= 2))):
+    if mode == "fast" and (is_channel or (category == "software_company" and (n_keywords >= 3 or n_domain >= 2))):
         mode = "balanced"
     if mode == "balanced" and max_r >= 50 and is_channel and (n_keywords >= 2 or n_domain >= 2):
         mode = "deep"
@@ -47,24 +49,26 @@ def build_execution_plan(task: TaskSpec, provider_settings=None) -> ExecutionPla
         strategy_name = "document_research"
     elif task.task_type == "people_search":
         strategy_name = "linkedin_people_search"
-    elif is_software and is_channel:
+    elif primary_entity == "event":
+        strategy_name = "event_search"
+    elif primary_entity == "patent":
+        strategy_name = "patent_search"
+    elif primary_entity == "product":
+        strategy_name = "product_search"
+    elif category == "software_company" and is_channel:
         strategy_name = "software_channel_search"
-    elif task.target_category == "service_company":
+    elif category == "service_company":
         strategy_name = "service_vendor_search"
-    elif task.target_category == "software_company":
+    elif category == "software_company":
         strategy_name = "software_vendor_search"
 
     use_ddg = ps.use_ddg if ps else True
     use_exa = (ps.use_exa if ps else True) and task.task_type in {
-        "entity_discovery", "similar_entity_expansion", "market_research",
-        "document_research", "people_search",
+        "entity_discovery", "similar_entity_expansion", "market_research", "document_research", "people_search",
     }
     use_tavily = (ps.use_tavily if ps else False) and mode in {"balanced", "deep"}
-    use_serpapi = (ps.use_serpapi if ps else False) and mode == "deep"
+    use_serpapi = (ps.use_serpapi if ps else False) and (mode == "deep" or task.task_type == "people_search")
     use_firecrawl = ps.use_firecrawl if ps else False
-
-    if task.task_type == "people_search":
-        use_serpapi = (ps.use_serpapi if ps else False)
 
     use_exa_find_similar = use_exa and task.task_type == "similar_entity_expansion"
     use_local_llm_parser = getattr(task, "use_local_llm", False)
@@ -82,35 +86,34 @@ def build_execution_plan(task: TaskSpec, provider_settings=None) -> ExecutionPla
             max_q = {"ddg": 4, "exa": 15, "tavily": 0, "serpapi": 5}
         max_candidates = max(200, max_r * 5)
         use_tavily = False
-
     elif mode == "fast":
         max_q = {"ddg": 4, "exa": 2, "tavily": 0, "serpapi": 0}
         max_candidates = max(30, max_r * 3)
-
     elif mode == "deep":
         max_q = {"ddg": 12, "exa": 8, "tavily": 6, "serpapi": 4}
         max_candidates = max(200, max_r * 4)
-
     else:
         max_q = {"ddg": 7, "exa": 5, "tavily": 4, "serpapi": 0}
         max_candidates = max(100, max_r * 3)
 
-    if is_software and (n_keywords >= 2 or n_domain >= 2):
+    if category == "software_company" and (n_keywords >= 2 or n_domain >= 2):
         max_q["ddg"] += 1
         max_q["exa"] += 1
         max_candidates += 20
-
-    if is_software and (n_keywords >= 4 or n_domain >= 3):
+    if category == "software_company" and (n_keywords >= 4 or n_domain >= 3):
         max_q["exa"] += 1
         max_q["tavily"] += 1
         max_candidates += 25
-
     if is_channel:
         max_q["ddg"] += 1
         max_q["exa"] += 2
         if mode in {"balanced", "deep"}:
             max_q["tavily"] += 1
         max_candidates += 25
+    if getattr(task, "languages", None) and len(task.languages or []) > 1:
+        max_q["ddg"] += 1
+        max_q["exa"] += 1
+        max_candidates += 15
 
     if not use_exa:
         max_q["exa"] = 0
