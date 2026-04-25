@@ -1129,12 +1129,23 @@ if result and task_meta:
     rej = len(result.get("rejected_records", []))
     b = result.get("budget", {})
     all_records = result.get("records", []) or []
+    critic_issues = result.get("critic_issues", []) or []
+    gap_report = result.get("gap_report", {}) or {}
+    verification = result.get("verification", {}) or {}
+    provider_selection = result.get("provider_selection", {}) or {}
+    discovery_meta = result.get("discovery", {}) or {}
     is_people = task_meta["task_type"] == "people_search"
     is_papers = task_meta["task_type"] == "document_research"
 
     refined_records, app_removed = _refine_company_records(all_records, task_meta)
     records = all_records if (is_people or is_papers) else refined_records
     total = len(records)
+
+    top_critic = [x for x in critic_issues if str(x.get("severity", "")).lower() in {"warning", "error"}]
+    if top_critic:
+        st.warning(" · ".join(f"{x.get('code', 'issue')}: {x.get('message', '')}" for x in top_critic[:2]))
+    if gap_report.get("recommendations"):
+        st.info("Gap analysis: " + " | ".join(gap_report.get("recommendations", [])[:2]))
 
     if (not is_people and not is_papers) and total == 0 and len(all_records) > 0:
         if task_meta.get("include_countries") or task_meta.get("exclude_presence_countries") or task_meta.get("exclude_countries"):
@@ -1387,6 +1398,37 @@ if result and task_meta:
                 st.code(task_meta["raw_prompt"], language="text")
             if app_removed:
                 st.markdown(f"- **App-side refinement removed:** {app_removed} obvious non-company / non-vendor records")
+
+        with st.expander("Query planning / provider strategy"):
+            if provider_selection.get("ordered"):
+                for item in provider_selection.get("ordered", []):
+                    st.markdown(f"- **{item.get('provider','')}** — priority {item.get('priority','')} · {item.get('reason','')}")
+            if discovery_meta.get("metadata", {}).get("final_counts"):
+                counts = discovery_meta.get("metadata", {}).get("final_counts", {})
+                st.markdown("- **Final planned queries:** " + ", ".join(f"{k}:{v}" for k, v in counts.items()))
+            if discovery_meta.get("issues"):
+                for item in discovery_meta.get("issues", []):
+                    st.markdown(f"- [{item.get('severity','info')}] **{item.get('code','issue')}** — {item.get('message','')}")
+
+        with st.expander("Verification / quality checks"):
+            st.markdown(f"- **Accepted after verification:** {verification.get('accepted_count', 0)}")
+            st.markdown(f"- **Rejected after verification:** {verification.get('rejected_count', 0)}")
+            if critic_issues:
+                for item in critic_issues[:8]:
+                    st.markdown(f"- [{item.get('severity','info')}] **{item.get('code','issue')}** — {item.get('message','')}" + (f"  \n  ↳ {item.get('recommendation','')}" if item.get('recommendation') else ""))
+
+        with st.expander("Gap analysis"):
+            if gap_report:
+                st.markdown(f"- **Results analyzed:** {gap_report.get('total_results', 0)}")
+                if gap_report.get('by_hq_country'):
+                    st.markdown("- **HQ countries:** " + ", ".join(f"{k}:{v}" for k, v in list(gap_report.get('by_hq_country', {}).items())[:8]))
+                if gap_report.get('by_source_provider'):
+                    st.markdown("- **Source providers:** " + ", ".join(f"{k}:{v}" for k, v in list(gap_report.get('by_source_provider', {}).items())[:8]))
+                if gap_report.get('recommendations'):
+                    for rec in gap_report.get('recommendations', []):
+                        st.markdown(f"- {rec}")
+                else:
+                    st.caption("No major gap recommendations.")
 
         with st.expander("Providers used"):
             provider_used = []
