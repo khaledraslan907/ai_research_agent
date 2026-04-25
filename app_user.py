@@ -334,14 +334,17 @@ _DIGITAL_CATEGORY_HINTS = (
     "scada", "cloud", "tech company", "technology company", "technology vendor",
 )
 
+
 _PRESENCE_OUTSIDE_PATTERNS = [
     r"\boperate(?:s|d|ing)?\s+outside\b",
     r"\bwork(?:s|ed|ing)?\s+outside\b",
     r"\bserv(?:e|es|ed|ing)\s+outside\b",
     r"\bactive\s+outside\b",
     r"\bpresent\s+outside\b",
-    r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence)\s+in\b",
-    r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence)\s+in\b",
+    r"\bno\s+(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
+    r"\bdo(?:es)?\s+not\s+have\s+(?:an?\s+)?(?:office|offices|branch|branches|subsidiar(?:y|ies)|local entity|local entities|presence|operations?|legal entities?)\s+in\b",
+    r"\b(?:do(?:es)?\s+not|don't|doesn't|cannot|can't)\s+(?:operate|work|serve|have|be\s+active|be\s+present)\b.*?\b(?:in|inside|within)\b",
+    r"\bnot\s+(?:operating|working|serving|active|present)\b.*?\b(?:in|inside|within)\b",
     r"\bexclude\b[^.\n;]{0,80}\bpresence\b",
     r"\bexcluding\b[^.\n;]{0,80}\bpresence\b",
 ]
@@ -360,8 +363,47 @@ _SOLUTION_KEYWORD_PATTERNS = {
     "predictive maintenance": [r"\bpredictive maintenance\b"],
 }
 
+
 _DOMAIN_KEYWORD_PATTERNS = {
+    "wireline": [r"\bwireline\b", r"\bwire line\b"],
+    "slickline": [r"\bslickline\b", r"\bslick line\b"],
+    "e-line": [r"\be-line\b", r"\beline\b", r"\belectric line\b", r"\be-line services\b"],
+    "well logging": [r"\bwell logging\b", r"\bwell log(?:ging)?\b"],
+    "open hole logging": [r"\bopen hole logging\b", r"\bopen-hole logging\b"],
+    "cased hole logging": [r"\bcased hole logging\b", r"\bcased-hole logging\b"],
+    "perforation": [r"\bperforation\b", r"\bperforating\b"],
+    "memory gauge": [r"\bmemory gauge\b", r"\bmemory gauges\b"],
+    "well intervention": [r"\bwell intervention\b"],
+    "completion": [r"\bcompletion services?\b", r"\bwell completion\b"],
+    "coiled tubing": [r"\bcoiled tubing\b", r"\bcoiled-tubing\b"],
+    "well testing": [r"\bwell testing\b", r"\bwell test\b"],
+    "mud logging": [r"\bmud logging\b"],
+    "drilling fluids": [r"\bdrilling fluids?\b", r"\bmud engineering\b"],
+    "cementing": [r"\bcementing\b", r"\bcementation\b"],
+    "fishing": [r"\bfishing services?\b", r"\bdownhole fishing\b"],
+    "downhole tools": [r"\bdownhole tools?\b"],
+    "well stimulation": [r"\bwell stimulation\b", r"\bstimulation services?\b"],
+    "acidizing": [r"\bacidizing\b", r"\bacidising\b", r"\bacid stimulation\b"],
+    "fracturing": [r"\bfracturing\b", r"\bfracking\b", r"\bhydraulic fracturing\b"],
+    "pipeline inspection": [r"\bpipeline inspection\b"],
+    "ndt": [r"\bndt\b", r"\bnon[- ]destructive testing\b"],
+    "asset integrity": [r"\basset integrity\b", r"\bintegrity management\b"],
+    "corrosion monitoring": [r"\bcorrosion monitoring\b"],
+    "instrumentation": [r"\binstrumentation\b"],
+    "automation": [r"\bindustrial automation\b", r"\bprocess automation\b", r"\bautomation\b"],
+    "scada": [r"\bscada\b"],
+    "process control": [r"\bprocess control\b"],
+    "offshore": [r"\boffshore\b"],
+    "marine services": [r"\bmarine services?\b"],
+    "diving services": [r"\bdiving services?\b"],
+    "rov": [r"\brov\b", r"\bremotely operated vehicle\b"],
+    "oilfield chemicals": [r"\boilfield chemicals?\b", r"\bproduction chemicals?\b", r"\bdrilling chemicals?\b"],
+    "water treatment": [r"\bwater treatment\b"],
+    "hse": [r"\bhse\b", r"\bhealth safety\b", r"\bprocess safety\b"],
+    "fire and gas": [r"\bfire and gas\b", r"\bgas detection\b"],
     "esp": [r"\besp\b", r"\belectrical submersible pump\b", r"\belectric submersible pump\b"],
+    "rod pump": [r"\brod pump\b", r"\bsucker rod pump\b"],
+    "gas lift": [r"\bgas lift\b"],
     "virtual flow metering": [r"\bvirtual flow metering\b", r"\bvirtual flow meter\b", r"\bvirtual meter\b"],
     "well performance": [r"\bwell performance\b"],
     "artificial lift": [r"\bartificial lift\b"],
@@ -372,9 +414,30 @@ _DOMAIN_KEYWORD_PATTERNS = {
     "production monitoring": [r"\bproduction monitoring\b"],
     "reservoir simulation": [r"\breservoir simulation\b"],
     "reservoir modeling": [r"\breservoir modeling\b", r"\breservoir modelling\b"],
+    "drilling": [r"\bdrilling\b"],
     "drilling optimization": [r"\bdrilling optimization\b", r"\bdrilling optimisation\b"],
     "production engineering": [r"\bproduction engineering\b"],
 }
+
+_GEO_EVIDENCE_HINTS = {
+    "egypt": [r"\begypt\b", r"\begyptian\b", r"\bcairo\b", r"\balexandria\b", r"\bsuez\b", r"\bport said\b", r"\b6th of october\b", r"\bnew cairo\b", r"\+20\b", r"\.eg\b"],
+    "united arab emirates": [r"\buae\b", r"\bunited arab emirates\b", r"\bdubai\b", r"\babudhabi\b", r"\babu dhabi\b", r"\bsharjah\b", r"\.ae\b"],
+    "united kingdom": [r"\buk\b", r"\bu\.k\.\b", r"\bunited kingdom\b", r"\bengland\b", r"\bscotland\b", r"\bwales\b", r"\blondon\b", r"\.uk\b"],
+    "united states": [r"\busa\b", r"\bu\.s\.a\.\b", r"\bunited states\b", r"\bhouston\b", r"\.us\b"],
+    "norway": [r"\bnorway\b", r"\bnorwegian\b", r"\boslo\b", r"\bstavanger\b", r"\.no\b"],
+    "saudi arabia": [r"\bsaudi arabia\b", r"\bsaudi\b", r"\bdammam\b", r"\bdhahran\b", r"\bal khobar\b", r"\.sa\b"],
+    "qatar": [r"\bqatar\b", r"\bdoha\b", r"\.qa\b"],
+    "oman": [r"\boman\b", r"\bmuscat\b", r"\.om\b"],
+    "kuwait": [r"\bkuwait\b", r"\.kw\b"],
+    "bahrain": [r"\bbahrain\b", r"\.bh\b"],
+}
+
+_SERVICE_RESULT_HINTS = [
+    "service", "services", "contractor", "engineering", "inspection", "maintenance",
+    "wireline", "slickline", "logging", "well intervention", "coiled tubing",
+    "testing", "instrumentation", "automation", "pipeline", "integrity",
+    "oilfield", "petroleum services", "production services", "drilling services",
+]
 
 
 def _extract_solution_keywords_from_prompt(prompt_lower: str) -> list[str]:
@@ -401,6 +464,7 @@ def _extract_commercial_intent_from_prompt(prompt_lower: str) -> str:
     if re.search(r"\b(partner|partners|channel partner|channel partners)\b", prompt_lower):
         return "partner"
     return "general"
+
 
 
 def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
@@ -434,8 +498,12 @@ def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
             or list(getattr(geo, "exclude_presence_countries", []) or [])
         )
 
-    return task_spec
+    industry = _clean_text(getattr(task_spec, "industry", ""))
+    domain_keywords = list(getattr(task_spec, "domain_keywords", []) or [])
+    if domain_keywords and (not industry or industry.lower() in {"oil and gas", "oil & gas", "energy", "petroleum"}):
+        task_spec.industry = f"{', '.join(domain_keywords[:4])} in oil and gas"
 
+    return task_spec
 
 def _normalize_paper_records(records: list[dict]) -> pd.DataFrame:
     rows = []
@@ -483,13 +551,59 @@ _COMPANYISH_HINTS = [
 ]
 
 
+
 def _record_text(record: dict) -> str:
     parts = [
         record.get("company_name"), record.get("description"), record.get("summary"),
         record.get("snippet"), record.get("website"), record.get("url"),
-        record.get("linkedin_url"), record.get("hq_country"), record.get("industry"), record.get("title"),
+        record.get("linkedin_url"), record.get("hq_country"), record.get("presence_countries"),
+        record.get("country"), record.get("location"), record.get("city"), record.get("title"),
     ]
     return _normalize_prompt_text(" ".join(str(p) for p in parts if not _is_blank(p)))
+
+
+def _country_patterns(country: str) -> list[str]:
+    c = _normalize_prompt_text(country)
+    if c in _GEO_EVIDENCE_HINTS:
+        return _GEO_EVIDENCE_HINTS[c]
+    return [rf"\b{re.escape(c)}\b"] if c else []
+
+
+def _record_matches_any_country(record: dict, countries: list[str]) -> bool:
+    if not countries:
+        return True
+    text = _record_text(record)
+    if not text:
+        return False
+    for country in countries:
+        for pat in _country_patterns(country):
+            if re.search(pat, text, re.IGNORECASE):
+                return True
+    return False
+
+
+def _record_matches_excluded_country(record: dict, countries: list[str]) -> bool:
+    if not countries:
+        return False
+    text = _record_text(record)
+    if not text:
+        return False
+    for country in countries:
+        for pat in _country_patterns(country):
+            if re.search(pat, text, re.IGNORECASE):
+                return True
+    return False
+
+
+def _requires_geo_evidence(task_meta: dict) -> bool:
+    include_countries = list(task_meta.get("include_countries") or [])
+    strict_mode = bool(task_meta.get("strict_mode"))
+    if not strict_mode or not include_countries:
+        return False
+    normalized = [_normalize_prompt_text(c) for c in include_countries]
+    if "egypt" in normalized:
+        return True
+    return len(include_countries) <= 2
 
 
 def _is_valid_company_record(record: dict, task_meta: dict) -> bool:
@@ -522,8 +636,27 @@ def _is_valid_company_record(record: dict, task_meta: dict) -> bool:
         if not (digital_ok and companyish_ok):
             return False
 
-    return True
+    if target_category == "service_company":
+        serviceish_ok = any(h in text for h in _SERVICE_RESULT_HINTS)
+        companyish_ok = bool(website) or any(h in text for h in _COMPANYISH_HINTS)
+        if not (serviceish_ok and companyish_ok):
+            return False
 
+    include_countries = list(task_meta.get("include_countries") or [])
+    exclude_countries = list(task_meta.get("exclude_countries") or [])
+    exclude_presence_countries = list(task_meta.get("exclude_presence_countries") or [])
+
+    if _requires_geo_evidence(task_meta):
+        if not _record_matches_any_country(record, include_countries):
+            return False
+
+    if exclude_presence_countries and _record_matches_excluded_country(record, exclude_presence_countries):
+        return False
+
+    if exclude_countries and _record_matches_excluded_country(record, exclude_countries):
+        return False
+
+    return True
 
 def _refine_company_records(records: list[dict], task_meta: dict) -> tuple[list[dict], int]:
     if task_meta.get("task_type") in {"document_research", "people_search"}:
@@ -842,15 +975,23 @@ if run_btn and prompt.strip():
     if field_summary:
         user_fields.append("summary")
 
+    base_attrs = list(dict.fromkeys(list(getattr(task_spec, "target_attributes", []) or [])))
+
     if task_spec.task_type == "document_research":
         task_spec.target_attributes = sorted(set([
             "website", "summary", "author", "authors", "year",
             "publication_year", "published_date", "abstract"
-        ] + user_fields))
+        ] + user_fields + base_attrs))
     elif task_spec.task_type == "people_search":
-        task_spec.target_attributes = ["linkedin", "website"]
+        task_spec.target_attributes = list(dict.fromkeys(["linkedin", "website"] + user_fields + base_attrs))
     else:
-        task_spec.target_attributes = user_fields or ["website", "email", "phone"]
+        default_attrs = user_fields or ["website", "email", "phone"]
+        geo_support_attrs = []
+        if getattr(task_spec.geography, "strict_mode", False):
+            geo_support_attrs.extend(["hq_country", "presence_countries", "summary"])
+        elif getattr(task_spec, "domain_keywords", None) or getattr(task_spec, "solution_keywords", None):
+            geo_support_attrs.append("summary")
+        task_spec.target_attributes = list(dict.fromkeys(base_attrs + default_attrs + geo_support_attrs))
 
     if not task_spec.industry or len(task_spec.industry.strip()) < 2:
         st.error(
@@ -936,6 +1077,7 @@ if run_btn and prompt.strip():
     st.session_state["search_result"] = result
     st.session_state["task_meta"] = {
         "task_type": task_spec.task_type,
+        "raw_prompt": clean_prompt,
         "industry": task_spec.industry,
         "target_category": getattr(task_spec, "target_category", "general"),
         "solution_keywords": list(getattr(task_spec, "solution_keywords", []) or []),
@@ -1224,6 +1366,8 @@ if result and task_meta:
                 st.markdown(f"- **Excluded presence countries:** {', '.join(_title_list(task_meta['exclude_presence_countries']))}")
             if task_meta.get("target_attributes"):
                 st.markdown(f"- **Requested fields:** {', '.join(task_meta['target_attributes'])}")
+            if task_meta.get("raw_prompt"):
+                st.code(task_meta["raw_prompt"], language="text")
             if app_removed:
                 st.markdown(f"- **App-side refinement removed:** {app_removed} obvious non-company / non-vendor records")
 
