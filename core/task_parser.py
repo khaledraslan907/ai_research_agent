@@ -48,6 +48,11 @@ ENTITY_HINTS = {
         "product", "products", "tool", "tools", "platform", "solution",
         "solutions", "app", "application", "software", "system",
     ],
+    "tender": [
+        "tender", "tenders", "rfq", "rfp", "itt", "itb", "bid", "bids",
+        "procurement", "procurements", "request for quotation", "request for proposal",
+        "invitation to tender", "tender notice", "vendor registration",
+    ],
 }
 
 ATTRIBUTE_HINTS = {
@@ -64,6 +69,9 @@ ATTRIBUTE_HINTS = {
     "summary": ["summary", "overview", "description", "abstract", "bio"],
     "author": ["author", "authors", "written by", "authored by", "who wrote", "researcher", "researchers"],
     "pdf": ["pdf", "full text", "download"],
+    "deadline": ["deadline", "due date", "closing date", "bid closing"],
+    "buyer": ["buyer", "issuer", "procuring entity", "tendering authority", "client"],
+    "exhibitors": ["exhibitor", "exhibitors"],
 }
 
 FORMAT_HINTS = {
@@ -414,6 +422,9 @@ def _extract_geography(prompt_lower: str) -> GeographyRules:
 
 
 def _extract_entity_types(prompt_lower: str) -> List[str]:
+    if _looks_like_tender_prompt(prompt_lower):
+        return ["tender"]
+
     found = []
     for entity_type, hints in ENTITY_HINTS.items():
         if any(re.search(r"\b" + re.escape(h) + r"\b", prompt_lower) for h in hints):
@@ -439,6 +450,8 @@ def _extract_output_format(prompt_lower: str) -> str:
 
 
 def _extract_task_type(prompt_lower: str) -> str:
+    if _looks_like_tender_prompt(prompt_lower):
+        return "market_research"
     if any(x in prompt_lower for x in [
         "enrich", "append", "fill missing", "complete list",
         "add email", "add phone", "enrich list", "update list",
@@ -737,6 +750,10 @@ def _extract_target_attributes(prompt_lower: str, task_type: str) -> List[str]:
         if any(re.search(r"\b" + re.escape(h) + r"\b", prompt_lower) for h in hints):
             found.append(attr)
 
+    if task_type == "market_research" and _looks_like_tender_prompt(prompt_lower):
+        defaults = ["website", "deadline", "buyer"]
+        return list(dict.fromkeys((found or defaults) + ["website"]))
+
     if task_type == "document_research":
         defaults = ["website", "summary", "author"]
         return sorted(set(found or defaults) | {"author"})
@@ -780,6 +797,9 @@ def parse_task_prompt(prompt: str) -> TaskSpec:
     commercial_intent = _extract_commercial_intent(prompt_lower)
     target_attributes = _extract_target_attributes(prompt_lower, task_type)
     max_results = _extract_max_results(prompt)
+
+    if entity_types == ["tender"]:
+        target_category = "general"
 
     ext = output_format if output_format != "ui_table" else "xlsx"
     filename = f"results.{ext}"
