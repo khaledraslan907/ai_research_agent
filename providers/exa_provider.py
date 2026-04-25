@@ -32,10 +32,6 @@ class ExaProvider(BaseSearchProvider):
     def is_available(self) -> bool:
         return bool(self.api_key and self._client)
 
-    # ------------------------------------------------------------------
-    # Standard semantic search
-    # ------------------------------------------------------------------
-
     def search(
         self,
         query: str,
@@ -45,7 +41,6 @@ class ExaProvider(BaseSearchProvider):
     ) -> List[SearchResult]:
         if not self.is_available():
             return []
-
         try:
             kwargs = dict(
                 query=query,
@@ -58,37 +53,15 @@ class ExaProvider(BaseSearchProvider):
                 kwargs["include_domains"] = include_domains
             if exclude_domains:
                 kwargs["exclude_domains"] = exclude_domains
-
             response = self._client.search_and_contents(**kwargs)
         except Exception:
             return []
-
         items = getattr(response, "results", None) or []
-        return [
-            self._item_to_result(item, query, idx)
-            for idx, item in enumerate(items, 1)
-            if self._get(item, "url")
-        ]
+        return [self._item_to_result(item, query, idx) for idx, item in enumerate(items, 1) if self._get(item, "url")]
 
-    # ------------------------------------------------------------------
-    # LinkedIn-scoped search — returns only linkedin.com/in/ URLs
-    # ------------------------------------------------------------------
-
-    def search_linkedin_profiles(
-        self,
-        query: str,
-        max_results: int = 10,
-    ) -> List[SearchResult]:
-        """
-        Search Exa restricted to linkedin.com/in/ personal profiles.
-        Tries multiple parameter styles for exa_py version compatibility:
-          - include_domains   (exa_py >= 1.1)
-          - includeDomains    (some older versions)
-        Falls back to plain search + URL filter if both fail.
-        """
+    def search_linkedin_profiles(self, query: str, max_results: int = 10) -> List[SearchResult]:
         if not self.is_available():
             return []
-
         base_kwargs = dict(
             query=query,
             type=self.search_type,
@@ -96,50 +69,28 @@ class ExaProvider(BaseSearchProvider):
             highlights=True,
             text=True,
         )
-
-        # Try snake_case first (exa_py >= 1.1.x)
         for domain_kwarg in ("include_domains", "includeDomains"):
             try:
                 kwargs = {**base_kwargs, domain_kwarg: ["linkedin.com/in"]}
                 response = self._client.search_and_contents(**kwargs)
                 items = getattr(response, "results", None) or []
-                results = [
-                    self._item_to_result(item, query, idx)
-                    for idx, item in enumerate(items, 1)
-                    if self._get(item, "url")
-                ]
-                if results:
-                    return results
-                # Empty result with this param is still valid — return empty
-                return results
+                return [self._item_to_result(item, query, idx) for idx, item in enumerate(items, 1) if self._get(item, "url")]
             except TypeError:
-                continue  # try next variant
+                continue
             except Exception:
                 return []
-
-        # Final fallback: plain search, then filter to /in/ URLs
         try:
             response = self._client.search_and_contents(**base_kwargs)
             items = getattr(response, "results", None) or []
-            all_results = [
-                self._item_to_result(item, query, idx)
-                for idx, item in enumerate(items, 1)
-                if self._get(item, "url")
-            ]
-            # Keep only linkedin.com/in/ personal profile URLs
+            all_results = [self._item_to_result(item, query, idx) for idx, item in enumerate(items, 1) if self._get(item, "url")]
             from core.people_search import is_linkedin_profile_url
             return [r for r in all_results if is_linkedin_profile_url(r.url)]
         except Exception:
             return []
 
-    # ------------------------------------------------------------------
-    # find_similar — seed-URL based expansion
-    # ------------------------------------------------------------------
-
     def find_similar(self, url: str, max_results: int = 5) -> List[SearchResult]:
         if not self.is_available():
             return []
-
         try:
             response = self._client.find_similar_and_contents(
                 url=url,
@@ -149,97 +100,15 @@ class ExaProvider(BaseSearchProvider):
             )
         except Exception:
             return []
-
         items = getattr(response, "results", None) or []
-        return [
-            self._item_to_result(item, f"find_similar:{url}", idx)
-            for idx, item in enumerate(items, 1)
-            if self._get(item, "url")
-        ]
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+        return [self._item_to_result(item, f"find_similar:{url}", idx) for idx, item in enumerate(items, 1) if self._get(item, "url")]
 
     def _item_to_result(self, item, query: str, idx: int) -> SearchResult:
-        url        = self._get(item, "url", "")
-        title      = self._get(item, "title", "")
+        url = self._get(item, "url", "")
+        title = self._get(item, "title", "")
         highlights = self._get(item, "highlights", []) or []
-        text       = self._get(item, "text", "") or ""
-
-        if highlights and isinstance(highlights, list):
-            snippet = " ".join(str(x) for x in highlights[:3]).strip()
-        else:
-            snippet = str(text[:500]).strip() if text else ""
-
-        norm = normalize_url(url)
-        return SearchResult(
-            provider=self.name,
-            query=query,
-            title=title or "",
-            url=norm,
-            snippet=snippet,
-            domain=extract_domain(norm),
-            rank=idx,
-            raw={
-                "title":      title,
-                "url":        url,
-                "highlights": highlights,
-                "text":       text[:1000] if isinstance(text, str) else "",
-            },
-        )
-
-    @staticmethod
-    def _get(item, key: str, default=None):
-        if isinstance(item, dict):
-            return item.get(key, default)
-        return getattr(item, key, default)
-
-
-    # ------------------------------------------------------------------
-    # find_similar — seed-URL based expansion
-    # ------------------------------------------------------------------
-
-    def find_similar(self, url: str, max_results: int = 5) -> List[SearchResult]:
-        """
-        Given a seed company URL, return semantically similar company pages.
-        Used for similar_entity_expansion tasks.
-        """
-        if not self.is_available():
-            return []
-
-        try:
-            response = self._client.find_similar_and_contents(
-                url=url,
-                num_results=max_results,
-                highlights=True,
-                text=True,
-            )
-        except Exception:
-            return []
-
-        items = getattr(response, "results", None) or []
-        return [
-            self._item_to_result(item, f"find_similar:{url}", idx)
-            for idx, item in enumerate(items, 1)
-            if self._get(item, "url")
-        ]
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _item_to_result(self, item, query: str, idx: int) -> SearchResult:
-        url       = self._get(item, "url", "")
-        title     = self._get(item, "title", "")
-        highlights = self._get(item, "highlights", []) or []
-        text      = self._get(item, "text", "") or ""
-
-        if highlights and isinstance(highlights, list):
-            snippet = " ".join(str(x) for x in highlights[:3]).strip()
-        else:
-            snippet = str(text[:500]).strip() if text else ""
-
+        text = self._get(item, "text", "") or ""
+        snippet = " ".join(str(x) for x in highlights[:3]).strip() if highlights and isinstance(highlights, list) else str(text[:500]).strip()
         norm = normalize_url(url)
         return SearchResult(
             provider=self.name,
@@ -255,6 +124,7 @@ class ExaProvider(BaseSearchProvider):
                 "highlights": highlights,
                 "text": text[:1000] if isinstance(text, str) else "",
             },
+            source_type="web",
         )
 
     @staticmethod
