@@ -39,7 +39,7 @@ class TavilyProvider(BaseSearchProvider):
             response = self._client.search(
                 query=query,
                 max_results=max_results,
-                search_depth="basic",
+                search_depth="advanced" if max_results > 5 else "basic",
                 include_answer=False,
                 include_raw_content=False,
             )
@@ -48,15 +48,12 @@ class TavilyProvider(BaseSearchProvider):
 
         items = response.get("results", []) if isinstance(response, dict) else []
         results: List[SearchResult] = []
-
         for idx, item in enumerate(items, start=1):
-            url     = item.get("url", "")
-            title   = item.get("title", "") or ""
+            url = item.get("url", "")
+            title = item.get("title", "") or ""
             snippet = item.get("content", "") or ""
-
             if not url:
                 continue
-
             norm = normalize_url(url)
             results.append(SearchResult(
                 provider=self.name,
@@ -67,6 +64,6 @@ class TavilyProvider(BaseSearchProvider):
                 domain=extract_domain(norm),
                 rank=idx,
                 raw=item,
+                source_type="web",
             ))
-
         return results
