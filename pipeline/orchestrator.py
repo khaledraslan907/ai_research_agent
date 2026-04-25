@@ -12,10 +12,11 @@ from core.config import (
     EXCLUDED_DOMAINS, KNOWN_USA_DOMAINS, KNOWN_EGYPT_DOMAINS,
     DIRECTORY_TITLE_PATTERNS,
 )
+from core.critic import review_task_spec, summarize_issues
 from core.dedup import deduplicate_companies
 from core.export_manager import export_records
 from core.free_llm_client import FreeLLMClient
-from core.llm_query_planner import plan_queries
+from core.gap_analyzer import analyze_result_gaps
 from core.llm_ranker import rerank_records
 from core.models import (
     CompanyRecord, ProviderSettings, SearchBudget, SearchResult, SearchSpec,
@@ -23,10 +24,11 @@ from core.models import (
 from core.task_models import TaskSpec, ExecutionPlan
 from core.plan_builder import build_execution_plan
 from core.provider_resolver import resolve_provider_keys
-from core.query_builder import QueryBuilder
+from core.provider_selector import recommend_providers, provider_budget_weights
 from core.scoring import score_records
 from core.utils import extract_domain
-from core.geography import contains_country_or_city, humanize_country_name
+from pipeline.discovery_pipeline import DiscoveryPipeline
+from pipeline.verification_pipeline import VerificationPipeline
 
 from providers.ddg_provider import DDGProvider
 from providers.exa_provider import ExaProvider
@@ -93,7 +95,6 @@ class SearchOrchestrator:
         else:
             _log("No LLM backends — keyword-only mode")
 
-        # disable providers without keys
         if task_spec.credential_mode.mode == "free":
             if not resolved_keys.exa_api_key:
                 provider_settings.use_exa = False
@@ -126,6 +127,15 @@ class SearchOrchestrator:
         execution_plan = build_execution_plan(task_spec, provider_settings)
         _log(f"Strategy: {execution_plan.strategy_name} | Mode: {task_spec.mode}")
 
+        task_issues = review_task_spec(task_spec)
+        if task_issues:
+            _log(f"Task critic: {summarize_issues(task_issues)}")
+
+        provider_selection = recommend_providers(task_spec, provider_settings)
+        provider_weights = provider_budget_weights(task_spec, provider_settings)
+        if provider_selection.ordered:
+            _log("Provider priority: " + ", ".join(f"{p.provider}({p.priority})" for p in provider_selection.ordered[:4]))
+
         if provider_settings.use_uploaded_seed_dedupe and uploaded_df is not None and not uploaded_df.empty:
             self.company_index.load_dataframe(uploaded_df)
             s = self.company_index.summary()
@@ -140,7 +150,10 @@ class SearchOrchestrator:
         )
         budget_manager = BudgetManager(budget)
 
-        all_planned_queries = plan_queries(task_spec, llm=llm_client)
+        discovery = DiscoveryPipeline(max_extra_per_provider=3).run(task_spec, llm=llm_client, include_expansions=True)
+        all_planned_queries = discovery.queries
+        if discovery.issues:
+            _log(f"Discovery critic: {summarize_issues(discovery.issues)}")
         _log(
             f"Queries planned — "
             f"DDG:{len(all_planned_queries.get('ddg', []))} "
@@ -160,49 +173,32 @@ class SearchOrchestrator:
         records: List[CompanyRecord] = []
         seen_domains: Set[str] = set()
 
-        # Stage 1 — DDG
         if provider_settings.use_ddg and execution_plan.use_ddg:
             ddg_queries = all_planned_queries.get("ddg", [])[:execution_plan.max_queries_per_provider.get("ddg", 5)]
             _log(f"Stage 1 DDG: {len(ddg_queries)} queries.")
             ddg_results = self._run_provider_queries(ddg, "ddg", ddg_queries, budget_manager, 10, logs)
             all_search_results.extend(ddg_results)
-            records.extend(self._results_to_records(
-                ddg_results, seen_domains, budget_manager, logs,
-                task_spec, scraper, provider_settings, local_llm,
-                execution_plan.max_candidates_to_process,
-                execution_plan.use_local_llm_classifier,
-            ))
+            records.extend(self._results_to_records(ddg_results, seen_domains, budget_manager, logs, task_spec, scraper, provider_settings, local_llm, execution_plan.max_candidates_to_process, execution_plan.use_local_llm_classifier))
 
-        # Stage 2 — Exa
         if provider_settings.use_exa and execution_plan.use_exa and exa.is_available():
             exa_cap = execution_plan.max_queries_per_provider.get("exa", 4)
             exa_queries = all_planned_queries.get("exa", [])[:exa_cap]
             _log(f"Stage 2 Exa: {len(exa_queries)} queries (cap={exa_cap}).")
             exa_max = 15 if (task_spec.max_results or 25) > 50 else 10
-
             if task_spec.task_type == "people_search":
                 linkedin_qs = [q for q in exa_queries if q.family == "linkedin_exa"]
                 normal_qs = [q for q in exa_queries if q.family != "linkedin_exa"]
                 exa_results = []
                 if linkedin_qs:
                     _log(f"  Exa LinkedIn-scoped: {len(linkedin_qs)} queries → linkedin.com/in only")
-                    exa_results.extend(
-                        self._run_exa_linkedin_queries(exa, linkedin_qs, budget_manager, exa_max, logs)
-                    )
+                    exa_results.extend(self._run_exa_linkedin_queries(exa, linkedin_qs, budget_manager, exa_max, logs))
                 if normal_qs:
                     _log(f"  Skipping {len(normal_qs)} non-linkedin EXA queries for people_search")
             else:
                 exa_results = self._run_provider_queries(exa, "exa", exa_queries, budget_manager, exa_max, logs)
-
             all_search_results.extend(exa_results)
-            records.extend(self._results_to_records(
-                exa_results, seen_domains, budget_manager, logs,
-                task_spec, scraper, provider_settings, local_llm,
-                execution_plan.max_candidates_to_process,
-                execution_plan.use_local_llm_classifier,
-            ))
+            records.extend(self._results_to_records(exa_results, seen_domains, budget_manager, logs, task_spec, scraper, provider_settings, local_llm, execution_plan.max_candidates_to_process, execution_plan.use_local_llm_classifier))
 
-        # Stage 2b — Exa find_similar
         if execution_plan.use_exa_find_similar and exa.is_available() and records:
             seed_urls = [r.website for r in sorted(records, key=lambda x: x.confidence_score, reverse=True) if r.website][:3]
             _log(f"Stage 2b Exa find_similar: {len(seed_urls)} seeds.")
@@ -217,40 +213,22 @@ class SearchOrchestrator:
                     budget_manager.register_search_call("exa")
                     self.cache.set_query("exa_similar", seed_url, 5, [r.to_dict() for r in similar_results])
                 all_search_results.extend(similar_results)
-                records.extend(self._results_to_records(
-                    similar_results, seen_domains, budget_manager, logs,
-                    task_spec, scraper, provider_settings, local_llm,
-                    execution_plan.max_candidates_to_process,
-                    execution_plan.use_local_llm_classifier,
-                ))
+                records.extend(self._results_to_records(similar_results, seen_domains, budget_manager, logs, task_spec, scraper, provider_settings, local_llm, execution_plan.max_candidates_to_process, execution_plan.use_local_llm_classifier))
 
-        # Stage 3 — Tavily
         if provider_settings.use_tavily and execution_plan.use_tavily and tavily.is_available():
             tavily_queries = all_planned_queries.get("tavily", [])[:execution_plan.max_queries_per_provider.get("tavily", 3)]
             _log(f"Stage 3 Tavily: {len(tavily_queries)} queries.")
             tavily_results = self._run_provider_queries(tavily, "tavily", tavily_queries, budget_manager, 10, logs)
             all_search_results.extend(tavily_results)
-            records.extend(self._results_to_records(
-                tavily_results, seen_domains, budget_manager, logs,
-                task_spec, scraper, provider_settings, local_llm,
-                execution_plan.max_candidates_to_process,
-                execution_plan.use_local_llm_classifier,
-            ))
+            records.extend(self._results_to_records(tavily_results, seen_domains, budget_manager, logs, task_spec, scraper, provider_settings, local_llm, execution_plan.max_candidates_to_process, execution_plan.use_local_llm_classifier))
 
-        # Stage 4 — SerpApi
         if provider_settings.use_serpapi and execution_plan.use_serpapi and serpapi.is_available():
             serp_queries = all_planned_queries.get("serpapi", [])[:execution_plan.max_queries_per_provider.get("serpapi", 3)]
             _log(f"Stage 4 SerpApi: {len(serp_queries)} queries.")
             serp_results = self._run_provider_queries(serpapi, "serpapi", serp_queries, budget_manager, 10, logs)
             all_search_results.extend(serp_results)
-            records.extend(self._results_to_records(
-                serp_results, seen_domains, budget_manager, logs,
-                task_spec, scraper, provider_settings, local_llm,
-                execution_plan.max_candidates_to_process,
-                execution_plan.use_local_llm_classifier,
-            ))
+            records.extend(self._results_to_records(serp_results, seen_domains, budget_manager, logs, task_spec, scraper, provider_settings, local_llm, execution_plan.max_candidates_to_process, execution_plan.use_local_llm_classifier))
 
-        # Post-search
         _log(f"Raw candidates before dedup: {len(records)}")
         records = deduplicate_companies(records)
         _log(f"After dedup: {len(records)}")
@@ -259,21 +237,19 @@ class SearchOrchestrator:
         records = score_records(records, search_spec)
         records.sort(key=lambda x: x.confidence_score, reverse=True)
 
-        if (
-            llm_client.is_available()
-            and records
-            and task_spec.mode.lower() != "fast"
-            and task_spec.task_type != "people_search"
-        ):
+        if llm_client.is_available() and records and task_spec.mode.lower() != "fast" and task_spec.task_type != "people_search":
             _log(f"LLM re-ranking {min(len(records), 80)} candidates...")
             records = rerank_records(records=records, task_spec=task_spec, llm=llm_client, batch_size=40)
             records.sort(key=lambda x: x.confidence_score, reverse=True)
 
-        final_records: List[CompanyRecord] = []
-        rejected_records: List[CompanyRecord] = []
+        verification = VerificationPipeline(min_score=float(min_confidence_score or 0)).run(records, task_spec)
+        if verification.issues:
+            _log(f"Verification critic: {summarize_issues(verification.issues)}")
 
-        for rec in records:
-            reason = self._get_reject_reason(rec, task_spec, min_confidence_score)
+        final_records: List[CompanyRecord] = []
+        rejected_records: List[CompanyRecord] = list(verification.rejected)
+        for rec in verification.accepted:
+            reason = self._get_reject_reason(rec, task_spec, 0)
             if reason:
                 rec.notes = (rec.notes + f" | rejected:{reason}").strip(" |")
                 rejected_records.append(rec)
@@ -285,11 +261,15 @@ class SearchOrchestrator:
                 break
 
         _log(f"Accepted: {len(final_records)} | Rejected: {len(rejected_records)}")
-        if not final_records and task_spec.geography.strict_mode and task_spec.task_type not in {"people_search", "document_research"}:
-            _log("No verified records satisfied strict geography evidence. This is better than returning false positives.")
 
         if task_spec.task_type in {"entity_discovery", "entity_enrichment", "similar_entity_expansion"}:
             final_records = self._enrich_accepted_records(final_records, scraper, budget_manager, logs, task_spec)
+
+        gap_report = analyze_result_gaps(final_records, task_spec)
+        if gap_report.recommendations:
+            _log("Gap analysis: " + " | ".join(gap_report.recommendations[:3]))
+
+        critic_issues = [*task_issues, *discovery.issues, *verification.issues]
 
         export_path = export_records(
             records=final_records,
@@ -312,6 +292,12 @@ class SearchOrchestrator:
             "export_path": str(export_path) if export_path else "",
             "total_found": len(final_records),
             "raw_search_results": len(all_search_results),
+            "provider_selection": provider_selection.to_dict(),
+            "provider_budget_weights": provider_weights,
+            "discovery": discovery.to_dict(),
+            "verification": verification.to_dict(),
+            "gap_report": gap_report.to_dict(),
+            "critic_issues": [vars(x) for x in critic_issues],
         }
 
     # ==================================================================
@@ -845,14 +831,6 @@ class SearchOrchestrator:
         if self.company_index.contains_company(rec.company_name, rec.domain):
             return "duplicate"
 
-        # strict geography searches should not keep globally ambiguous company pages
-        if task_spec.geography.strict_mode and task_spec.task_type not in {"people_search", "document_research"}:
-            geo_known = bool((rec.hq_country or "").strip() or (rec.country or "").strip() or list(rec.presence_countries or []))
-            text_blob = " ".join([rec.company_name or "", rec.description or "", rec.notes or "", rec.website or "", rec.source_url or ""]).lower()
-            has_include_hint = any(contains_country_or_city(text_blob, c) for c in (task_spec.geography.include_countries or []))
-            if not geo_known and not has_include_hint:
-                return "missing_required_geography_evidence"
-
         return None
 
     def _violates_geography(self, rec: CompanyRecord, task_spec: TaskSpec) -> bool:
@@ -864,53 +842,60 @@ class SearchOrchestrator:
         rec_country = (rec.country or "").lower().strip()
         presence = [c.lower().strip() for c in (rec.presence_countries or [])]
         domain = (rec.domain or "").lower()
-        website = (rec.website or rec.source_url or "").lower()
-        evidence_text = " ".join([
-            rec.company_name or "", rec.description or "", rec.notes or "",
-            rec.website or "", rec.source_url or "", rec.contact_page or "", rec.email or "",
-        ]).lower()
-
-        def _known_match(country: str) -> bool:
-            if not country:
-                return False
-            if rec_hq == country or rec_country == country:
-                return True
-            if country in presence:
-                return True
-            if contains_country_or_city(evidence_text, country):
-                return True
-            if country == "egypt" and domain in KNOWN_EGYPT_DOMAINS:
-                return True
-            if country == "usa" and domain in KNOWN_USA_DOMAINS:
-                return True
-            if country == "egypt" and any(s in website for s in ["/egypt", "cairo", ".eg/"]):
-                return True
-            if country == "usa" and any(s in website for s in ["/us/", "/en-us/", "houston", "texas"]):
-                return True
-            return False
 
         if exclude_countries:
-            for c in exclude_countries:
-                if _known_match(c):
+            if rec_hq and rec_hq in exclude_countries:
+                return True
+            if rec_country and rec_country in exclude_countries:
+                return True
+
+            if "usa" in exclude_countries and domain in KNOWN_USA_DOMAINS:
+                return True
+            if "egypt" in exclude_countries and domain in KNOWN_EGYPT_DOMAINS:
+                return True
+
+            url_lower = (rec.website or rec.source_url or "").lower()
+            if "usa" in exclude_countries and not rec_hq and not rec_country:
+                if any(s in url_lower for s in ["/en-us/", "/us/en/", "/us-en/"]):
                     return True
+
+            if not rec_hq and not rec_country:
+                STRONG_HQ_PHRASES = {
+                    "usa": [
+                        "headquartered in the usa", "headquartered in the united states",
+                        "based in the us", "us-based company", "american company",
+                        ", texas", "abilene, tx", "houston, tx", "plano, tx",
+                        "the woodlands, tx",
+                    ],
+                    "egypt": [
+                        "headquartered in egypt", "based in egypt",
+                        "egyptian company", "cairo-based",
+                    ],
+                }
+                name_desc = f"{rec.company_name or ''} {rec.description or ''}".lower()
+                for c in exclude_countries:
+                    phrases = STRONG_HQ_PHRASES.get(c, [f"headquartered in {c}", f"based in {c}"])
+                    if any(p in name_desc for p in phrases):
+                        return True
 
         if exclude_presence:
-            for c in exclude_presence:
-                if c in presence:
-                    return True
-                if c == "usa" and rec.has_usa_presence:
-                    return True
-                if c == "egypt" and rec.has_egypt_presence:
-                    return True
-                # explicit presence-style text should reject for exclude_presence
-                if c and contains_country_or_city(evidence_text, c) and any(x in evidence_text for x in ["office", "branch", "presence", "operations", "مكتب", "فرع", "تواجد"]):
-                    return True
-
-        # strict include mode: for company/entity searches, require positive evidence instead of allowing global unknowns
-        if include_countries and task_spec.geography.strict_mode and task_spec.task_type != "people_search":
-            matched = any(_known_match(c) for c in include_countries)
-            if not matched:
+            if any(p in exclude_presence for p in presence):
                 return True
+            if "usa" in exclude_presence and rec.has_usa_presence:
+                return True
+            if "egypt" in exclude_presence and rec.has_egypt_presence:
+                return True
+
+        if include_countries and task_spec.geography.strict_mode:
+            known_geo = bool(rec_hq or rec_country or presence)
+            if known_geo:
+                matched = (
+                    (rec_hq and rec_hq in include_countries)
+                    or (rec_country and rec_country in include_countries)
+                    or any(p in include_countries for p in presence)
+                )
+                if not matched:
+                    return True
 
         return False
 
@@ -946,7 +931,7 @@ class SearchOrchestrator:
             optional_fields=optional,
             max_results=task_spec.max_results,
             mode=task_spec.mode,
-            language=("ar" if re.search(r"[\u0600-\u06FF]", task_spec.raw_prompt or "") else "en"),
+            language="en",
         )
 
     def _build_budget(
