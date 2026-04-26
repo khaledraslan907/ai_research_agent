@@ -1,13 +1,12 @@
-
 from __future__ import annotations
 
 import os
 from pathlib import Path
 from typing import Any
-import difflib
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
@@ -21,12 +20,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
-.block-container {padding-top: 1.6rem; padding-bottom: 2rem; max-width: 1180px;}
+.block-container { padding-top: 1.6rem; padding-bottom: 2rem; max-width: 1180px; }
 .hero-title { font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc; margin-bottom: 0.2rem; line-height: 1.08; }
 .hero-subtitle { color: #b3bfd4; font-size: 1.04rem; margin-bottom: 0.95rem; line-height: 1.5; }
 .search-shell {
@@ -79,24 +79,18 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     border: 1px dashed rgba(124, 143, 179, 0.22);
     border-radius: 16px; padding: 1.25rem; color: #c4cede;
 }
-.mode-label { color: #f8fafc; font-weight: 600; margin-bottom: 0.55rem; }
-.mode-card {
-    border-radius: 14px; padding: 0.55rem 0.2rem; text-align: center;
-    border: 1px solid rgba(124, 143, 179, 0.22); background: rgba(255,255,255,0.02);
-}
-.mode-selected {
-    border-color: rgba(99, 131, 255, 0.65);
-    background: rgba(83, 113, 255, 0.18);
-    box-shadow: inset 0 0 0 1px rgba(99, 131, 255, 0.18);
-}
-.mode-name { color: #f7f9fc; font-size: 1rem; font-weight: 700; margin-bottom: 0.05rem; }
 .key-status {
     color: #d7eadc; background: rgba(41, 89, 63, 0.22); border: 1px solid rgba(91, 166, 116, 0.18);
     border-radius: 12px; padding: 0.55rem 0.75rem; font-size: 0.88rem; margin-top: 0.6rem;
 }
 .stButton > button { border-radius: 12px; }
+div[data-testid="stTooltipIcon"] svg { width: 0.88rem; height: 0.88rem; }
+div[data-testid="stRadio"] > div { gap: 0.45rem; }
+div[data-testid="stRadio"] label p { font-weight: 600; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 def _secret(key: str, default: str = "") -> str:
@@ -271,60 +265,41 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
-COMMON_TERMS = [
-    "describe", "search", "companies", "company", "academic", "papers", "paper",
-    "linkedin", "accounts", "account", "profiles", "profile", "tenders", "products",
-    "exhibitors", "website", "email", "phone", "germany", "egypt", "saudi",
-    "arabia", "software", "manufacturing", "electrical", "submersible", "pump",
-    "pumps", "petroleum", "engineers", "engineer", "find", "with", "about", "what"
-]
-
-
-def _suggest_corrections(text: str) -> list[tuple[str, str]]:
-    tokens = [t.strip(".,:;!?()[]{}\"'").lower() for t in text.split()]
-    suggestions = []
-    seen = set()
-    for tok in tokens:
-        if len(tok) < 4 or tok in COMMON_TERMS:
-            continue
-        match = difflib.get_close_matches(tok, COMMON_TERMS, n=1, cutoff=0.78)
-        if match and (tok, match[0]) not in seen:
-            seen.add((tok, match[0]))
-            suggestions.append((tok, match[0]))
-    return suggestions[:4]
+def _inject_spellcheck():
+    components.html(
+        """
+        <script>
+        const setSpell = () => {
+          const areas = window.parent.document.querySelectorAll('textarea');
+          areas.forEach(a => {
+            a.setAttribute('spellcheck', 'true');
+            a.setAttribute('autocomplete', 'on');
+            a.setAttribute('autocorrect', 'on');
+          });
+        };
+        setSpell();
+        const observer = new MutationObserver(setSpell);
+        observer.observe(window.parent.document.body, { childList: true, subtree: true });
+        </script>
+        """,
+        height=0,
+    )
 
 
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
-mode_help = {
-    "Fast": "Quickest option for light discovery.",
-    "Balanced": "Recommended for most searches.",
-    "Deep": "Best for difficult or niche searches.",
-}
-if "mode" not in st.session_state:
-    st.session_state.mode = "Balanced"
 
 with st.sidebar:
     st.markdown("## Search settings")
     st.caption("Choose a search mode and optional integrations.")
 
-    st.markdown('<div class="mode-label">Search mode</div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1.0, 1.45, 1.0], gap="small")
-
-    def _mode_button(col, name, help_text):
-        selected = st.session_state.mode == name
-        col.markdown(
-            f'<div class="mode-card {"mode-selected" if selected else ""}"><div class="mode-name">{name}</div></div>',
-            unsafe_allow_html=True,
-        )
-        if col.button(name, key=f"mode_{name}", help=help_text, use_container_width=True):
-            st.session_state.mode = name
-            st.rerun()
-
-    _mode_button(c1, "Fast", mode_help["Fast"])
-    _mode_button(c2, "Balanced", mode_help["Balanced"])
-    _mode_button(c3, "Deep", mode_help["Deep"])
-
-    mode = st.session_state.mode
+    mode = st.radio(
+        "Search mode",
+        ["Fast", "Balanced", "Deep"],
+        index=1,
+        horizontal=True,
+        help="Fast is quickest, Balanced is recommended, and Deep is best for more difficult or niche searches.",
+    )
+    st.caption(f"Target results: {mode_defaults[mode]}")
     max_results = mode_defaults[mode]
 
     with st.expander("Optional integrations", expanded=False):
@@ -398,10 +373,8 @@ prompt = st.text_area(
         "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
     ),
 )
-corrections = _suggest_corrections(prompt)
-if corrections:
-    rendered = " · ".join([f"“{bad}” → “{good}”" for bad, good in corrections])
-    st.caption(f"Suggestions: {rendered}")
+_inject_spellcheck()
+st.caption("Browser spellcheck is enabled while you type.")
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
