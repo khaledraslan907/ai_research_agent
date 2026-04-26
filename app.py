@@ -1,1 +1,1 @@
-from app_user_release import *
+from app_user_hotfix import *

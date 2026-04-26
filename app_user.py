@@ -1012,6 +1012,7 @@ st.session_state["prompt_value"] = prompt
 
 _has_llm = bool(groq_key or gemini_key or anthropic_key or openai_key or openrouter_key)
 _has_search = bool(exa_key or tavily_key or serpapi_key)
+is_ddg_only_free = (not _has_llm) and (not _has_search)
 if not _has_llm and not _has_search:
     st.warning("⚠️ No API keys set — results will be limited (DDG-only, no ranking). Add a free Groq key in the sidebar for much better results.")
 
@@ -1036,6 +1037,16 @@ if run_btn and prompt.strip():
     task_spec = _postprocess_task_spec_from_prompt(task_spec, clean_prompt)
     task_spec.mode = mode
     task_spec.max_results = int(max_results)
+
+    has_geo = bool(
+        list(getattr(task_spec.geography, "include_countries", []) or [])
+        or list(getattr(task_spec.geography, "exclude_countries", []) or [])
+        or list(getattr(task_spec.geography, "exclude_presence_countries", []) or [])
+    )
+    task_spec.geography.strict_mode = bool(has_geo and not is_ddg_only_free)
+
+    if is_ddg_only_free and has_geo:
+        st.info("Free mode is running with DDG only, so geography is being treated more softly to avoid zero-result searches.")
 
     fmt_map = {
         "Auto-detect from prompt": None,
@@ -1615,19 +1626,6 @@ if result and task_meta:
             if critic_issues:
                 for item in critic_issues[:8]:
                     st.markdown(f"- [{item.get('severity','info')}] **{item.get('code','issue')}** — {item.get('message','')}" + (f"  \n  ↳ {item.get('recommendation','')}" if item.get('recommendation') else ""))
-
-        with st.expander("Gap analysis"):
-            if gap_report:
-                st.markdown(f"- **Results analyzed:** {gap_report.get('total_results', 0)}")
-                if gap_report.get('by_hq_country'):
-                    st.markdown("- **HQ countries:** " + ", ".join(f"{k}:{v}" for k, v in list(gap_report.get('by_hq_country', {}).items())[:8]))
-                if gap_report.get('by_source_provider'):
-                    st.markdown("- **Source providers:** " + ", ".join(f"{k}:{v}" for k, v in list(gap_report.get('by_source_provider', {}).items())[:8]))
-                if gap_report.get('recommendations'):
-                    for rec in gap_report.get('recommendations', []):
-                        st.markdown(f"- {rec}")
-                else:
-                    st.caption("No major gap recommendations.")
 
         with st.expander("Providers used"):
             provider_used = []
