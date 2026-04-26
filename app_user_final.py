@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
+from rapidfuzz import process, fuzz
 
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
@@ -33,12 +35,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     color: #e7ecf5;
 }
 .block-container {padding-top: 1.7rem; padding-bottom: 2rem; max-width: 1180px;}
-.hero-panel {
-    background: transparent;
-    border: none;
-    padding: 0.25rem 0 0.55rem 0;
-    margin-bottom: 0.25rem;
-}
+.hero-panel { background: transparent; border: none; padding: 0.25rem 0 0.55rem 0; margin-bottom: 0.25rem; }
 .hero-title {
     font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em;
     color: #f8fafc; margin-bottom: 0.2rem; line-height: 1.08;
@@ -108,10 +105,30 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 .small-caption { color: #8f9bb0; font-size: 0.84rem; }
 .mode-note { color: #aeb9cb; font-size: 0.85rem; margin-top: 0.45rem; }
+.suggest-line {
+    color: #aeb9cb;
+    font-size: 0.89rem;
+    margin: 0.55rem 0 0.1rem 0;
+    line-height: 1.45;
+}
+/* better sidebar mode buttons */
+div[data-testid="stSidebar"] button[kind="secondary"] {
+    white-space: nowrap !important;
+}
 @media (max-width: 900px) {
     .hero-title { font-size: 2rem; }
 }
 </style>
+<script>
+window.addEventListener('load', function() {
+  const setSpell = () => {
+    const areas = window.parent.document.querySelectorAll('textarea');
+    areas.forEach(a => a.setAttribute('spellcheck', 'true'));
+  };
+  setSpell();
+  setTimeout(setSpell, 800);
+});
+</script>
 """,
     unsafe_allow_html=True,
 )
@@ -120,6 +137,14 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+SUGGEST_TERMS = [
+    "software", "companies", "service", "engineering", "academic", "papers",
+    "linkedin", "accounts", "profiles", "tenders", "exhibitors", "products",
+    "germany", "egypt", "saudi arabia", "norway", "food manufacturing",
+    "electrical submersible pump", "wireline", "slickline", "well logging",
+]
+
+
 def _secret(key: str, default: str = "") -> str:
     try:
         return st.secrets.get(key, "") or os.getenv(key, default)
@@ -303,14 +328,37 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
+def _typing_hints(text: str) -> list[str]:
+    cleaned = (text or "").strip()
+    if len(cleaned) < 4:
+        return []
+    tokens = re.findall(r"[A-Za-z\u0600-\u06FF][A-Za-z\u0600-\u06FF\- ]+", cleaned.lower())
+    hints: list[str] = []
+    for token in tokens[-6:]:
+        tok = token.strip()
+        if len(tok) < 4:
+            continue
+        match = process.extractOne(tok, SUGGEST_TERMS, scorer=fuzz.WRatio)
+        if match and match[1] >= 88 and match[0].lower() != tok.lower():
+            hints.append(f"{tok} → {match[0]}")
+    # unique preserve
+    out = []
+    seen = set()
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            out.append(h)
+    return out[:3]
+
+
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
 mode_help = {
-    "Fast": "Quickest option for light discovery and early exploration.",
-    "Balanced": "Recommended for most searches with broader coverage and stronger quality.",
-    "Deep": "Best for difficult or niche searches when you want more thorough retrieval.",
+    "Fast": "Quick search",
+    "Balanced": "Best overall",
+    "Deep": "Broader search",
 }
 
 if "rn_mode" not in st.session_state:
@@ -321,12 +369,12 @@ with st.sidebar:
     st.caption("Choose a search mode and optional integrations.")
 
     st.markdown("**Search mode**")
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Fast", help=mode_help["Fast"], use_container_width=True):
+    c1, c2, c3 = st.columns([1, 1.55, 1])
+    if c1.button("Fast ?", help=mode_help["Fast"], use_container_width=True):
         st.session_state["rn_mode"] = "Fast"
-    if c2.button("Balanced", help=mode_help["Balanced"], use_container_width=True):
+    if c2.button("Balanced ?", help=mode_help["Balanced"], use_container_width=True):
         st.session_state["rn_mode"] = "Balanced"
-    if c3.button("Deep", help=mode_help["Deep"], use_container_width=True):
+    if c3.button("Deep ?", help=mode_help["Deep"], use_container_width=True):
         st.session_state["rn_mode"] = "Deep"
 
     mode = st.session_state["rn_mode"]
@@ -377,7 +425,7 @@ with st.sidebar:
 3. Click **Create Key**.  
 4. Copy the key and paste it here.
 
-**[Tavily — Platform / Get an API Key](https://app.tavily.com/home)**  
+**[Tavily — Platform](https://app.tavily.com/home)**  
 1. Create a free account or sign in.  
 2. Open your dashboard.  
 3. Copy one of your API keys.  
@@ -434,6 +482,14 @@ prompt = st.text_area(
         "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
     ),
 )
+
+hints = _typing_hints(prompt)
+if hints:
+    st.markdown(
+        "<div class='suggest-line'><strong>Did you mean:</strong> " + " • ".join(hints) + "</div>",
+        unsafe_allow_html=True,
+    )
+
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
