@@ -36,8 +36,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .hero-panel {
     background: transparent;
     border: none;
-    padding: 0.3rem 0 0.6rem 0;
-    margin-bottom: 0.3rem;
+    padding: 0.25rem 0 0.55rem 0;
+    margin-bottom: 0.25rem;
 }
 .hero-title {
     font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em;
@@ -53,23 +53,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     padding: 1.05rem 1.05rem 0.9rem 1.05rem;
     box-shadow: 0 18px 44px rgba(0,0,0,0.28);
     margin-bottom: 1rem;
-}
-.mode-grid, .key-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.8rem;
-    margin: 0.8rem 0 1rem 0;
-}
-.mode-card, .hint-card {
-    background: rgba(15, 22, 38, 0.86);
-    border: 1px solid rgba(124, 143, 179, 0.16);
-    border-radius: 16px;
-    padding: 0.9rem 1rem;
-}
-.mode-card h4, .hint-card h4 { margin: 0 0 0.32rem 0; color: #f8fafc; font-size: 0.98rem; }
-.mode-card p, .hint-card p { margin: 0; color: #aeb9cb; font-size: 0.88rem; line-height: 1.45; }
-.inline-note {
-    color: #a8b3c7; font-size: 0.9rem; margin-top: 0.35rem; margin-bottom: 0.2rem;
 }
 .summary-card {
     background: rgba(15, 22, 38, 0.9);
@@ -115,17 +98,22 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .info-strip-title { color: #f8fafc; font-weight: 600; margin-bottom: 0.18rem; }
 .info-strip-text { color: #aeb9cb; font-size: 0.9rem; line-height: 1.45; }
 .key-status {
-    color: #cfe6d5;
-    background: rgba(41, 89, 63, 0.25);
-    border: 1px solid rgba(91, 166, 116, 0.22);
+    color: #d7eadc;
+    background: rgba(41, 89, 63, 0.22);
+    border: 1px solid rgba(91, 166, 116, 0.18);
     border-radius: 12px;
     padding: 0.55rem 0.75rem;
     font-size: 0.88rem;
     margin-top: 0.6rem;
 }
+.mode-hint {
+    margin-top: 0.45rem;
+    color: #aeb9cb;
+    font-size: 0.88rem;
+    line-height: 1.45;
+}
 .small-caption { color: #8f9bb0; font-size: 0.84rem; }
 @media (max-width: 900px) {
-    .mode-grid, .key-grid { grid-template-columns: 1fr; }
     .hero-title { font-size: 2rem; }
 }
 </style>
@@ -308,6 +296,7 @@ def _render_people_cards(records: list[dict]):
 def _connected_integrations(keys: dict[str, str]) -> list[str]:
     labels = {
         "groq": "Groq",
+        "gemini": "Gemini",
         "exa": "Exa",
         "tavily": "Tavily",
         "serpapi": "SerpApi",
@@ -318,56 +307,62 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
+mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
+mode_help = {
+    "Fast": "Quickest option for light discovery and early exploration.",
+    "Balanced": "Recommended for most searches, with stronger coverage and better overall quality.",
+    "Deep": "Best for difficult or niche searches when you want broader and more thorough retrieval.",
+}
+
 with st.sidebar:
     st.markdown("## Search settings")
-    st.caption("Adjust search depth, optional integrations, and export preferences.")
+    st.caption("Choose a search mode and optional integrations.")
 
     mode = st.radio("Search mode", ["Fast", "Balanced", "Deep"], index=1, horizontal=True)
-    max_results = st.slider("Results to return", 5, 100, 25, 5)
+    max_results = mode_defaults[mode]
+    st.markdown(f"<div class='mode-hint'>{mode_help[mode]}</div>", unsafe_allow_html=True)
+    st.caption(f"Target results for {mode.lower()} mode: {max_results}")
 
     with st.expander("Optional integrations", expanded=False):
-        st.markdown("**Improve coverage and ranking with optional keys**")
-        st.caption("Recommended setup: Groq + Exa or Groq + Tavily")
+        st.markdown("**Optional keys for stronger search quality**")
+        st.caption("Recommended setup: Groq or Gemini for interpretation, plus Exa or Tavily for broader coverage.")
 
-        groq_key = st.text_input("Groq API key", value=_secret("GROQ_API_KEY"), type="password", help="Used for stronger query understanding and optional ranking.")
-        exa_key = st.text_input("Exa API key", value=_secret("EXA_API_KEY"), type="password", help="Useful for company, paper, and web discovery.")
-        tavily_key = st.text_input("Tavily API key", value=_secret("TAVILY_API_KEY"), type="password", help="Useful for broader web search coverage.")
-        serpapi_key = st.text_input("SerpApi key", value=_secret("SERPAPI_KEY"), type="password", help="Useful for Google-style search and LinkedIn discovery.")
+        groq_key = st.text_input("Groq API key", value=_secret("GROQ_API_KEY"), type="password")
+        gemini_key = st.text_input("Gemini API key", value=_secret("GEMINI_API_KEY"), type="password")
+        exa_key = st.text_input("Exa API key", value=_secret("EXA_API_KEY"), type="password")
+        tavily_key = st.text_input("Tavily API key", value=_secret("TAVILY_API_KEY"), type="password")
+        serpapi_key = st.text_input("SerpApi key", value=_secret("SERPAPI_KEY"), type="password")
 
         connected = _connected_integrations({
             "groq": groq_key,
+            "gemini": gemini_key,
             "exa": exa_key,
             "tavily": tavily_key,
             "serpapi": serpapi_key,
         })
         if connected:
             st.markdown(
-                f"<div class='key-status'>Connected integrations: {', '.join(connected)}</div>",
+                f"<div class='key-status'>Connected: {', '.join(connected)}</div>",
                 unsafe_allow_html=True,
             )
 
-        with st.expander("How to get these keys", expanded=False):
+        with st.expander("How to get keys", expanded=False):
             st.markdown(
                 """
-**Groq**  
-1. Create a free account at **console.groq.com**.  
-2. Open **API Keys**.  
-3. Create a new key and paste it here.
+**[Groq](https://console.groq.com/)**  
+Create a free account → open **API Keys** → create a key → paste it here.
 
-**Exa**  
-1. Create an account at **exa.ai**.  
-2. Open your dashboard.  
-3. Generate an API key and paste it here.
+**[Gemini](https://aistudio.google.com/)**  
+Open **Google AI Studio** → create an API key → paste it here.
 
-**Tavily**  
-1. Create a free account at **tavily.com**.  
-2. Open **API Keys** from your dashboard.  
-3. Copy the key and paste it here.
+**[Exa](https://exa.ai/)**  
+Create an account → open your dashboard → generate an API key → paste it here.
 
-**SerpApi**  
-1. Create an account at **serpapi.com**.  
-2. Open your dashboard.  
-3. Copy the API key and paste it here.
+**[Tavily](https://tavily.com/)**  
+Create a free account → open **API Keys** → copy your key → paste it here.
+
+**[SerpApi](https://serpapi.com/)**  
+Create an account → open your dashboard → copy the API key → paste it here.
                 """
             )
 
@@ -393,28 +388,8 @@ st.markdown('</div>', unsafe_allow_html=True)
 st.markdown(
     """
 <div class="info-strip">
-  <div class="info-strip-title">Optional integrations improve search quality</div>
-  <div class="info-strip-text">You can use the app without keys, but adding Groq, Exa, Tavily, or SerpApi improves interpretation, coverage, and relevance. Setup instructions are available in the <strong>Optional integrations</strong> panel in the sidebar.</div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    """
-<div class="mode-grid">
-  <div class="mode-card">
-    <h4>Fast</h4>
-    <p>Quickest option for light discovery and early exploration.</p>
-  </div>
-  <div class="mode-card">
-    <h4>Balanced</h4>
-    <p>Recommended for most searches, with stronger coverage and better quality.</p>
-  </div>
-  <div class="mode-card">
-    <h4>Deep</h4>
-    <p>Best for difficult or niche searches when you want broader and more thorough retrieval.</p>
-  </div>
+  <div class="info-strip-title">Optional integrations can improve search quality</div>
+  <div class="info-strip-text">For broader coverage and stronger interpretation, add Groq, Gemini, Exa, Tavily, or SerpApi from the <strong>Optional integrations</strong> section in the sidebar.</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -424,19 +399,15 @@ st.markdown('<div class="search-shell">', unsafe_allow_html=True)
 prompt = st.text_area(
     "What would you like to research?",
     value="",
-    height=225,
+    height=235,
     placeholder=(
         "Describe what you want to find in English or Arabic.\n\n"
         "Examples:\n"
         "• Find software companies in food manufacturing in Germany with website and email.\n"
-        "• Find academic papers about electrical submersible pumps with authors, abstract, and DOI.\n"
+        "• Find academic papers about electrical submersible pumps with authors and abstract.\n"
         "• Find LinkedIn accounts of petroleum engineers in Saudi Arabia.\n"
         "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
     ),
-)
-st.markdown(
-    "<div class='inline-note'>Tip: Write your request in plain language. Research Navigator will interpret the entity type, topic, geography, and requested information automatically.</div>",
-    unsafe_allow_html=True,
 )
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
@@ -451,6 +422,7 @@ if run_btn:
 
     user_keys = {
         "groq_api_key": groq_key,
+        "gemini_api_key": gemini_key,
         "exa_api_key": exa_key,
         "tavily_api_key": tavily_key,
         "serpapi_key": serpapi_key,
@@ -458,6 +430,7 @@ if run_btn:
 
     llm_client = FreeLLMClient(
         groq_api_key=groq_key,
+        gemini_api_key=gemini_key,
     )
 
     with st.spinner("Understanding your request..."):
