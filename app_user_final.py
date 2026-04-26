@@ -26,30 +26,53 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp {
-    background: linear-gradient(180deg, #0b1020 0%, #0e1426 100%);
+    background: linear-gradient(180deg, #070b14 0%, #0b1020 100%);
     color: #e7ecf5;
 }
-.block-container {padding-top: 2rem; padding-bottom: 2rem; max-width: 1180px;}
+.block-container {padding-top: 1.7rem; padding-bottom: 2rem; max-width: 1180px;}
+.hero-panel {
+    background: transparent;
+    border: none;
+    padding: 0.3rem 0 0.6rem 0;
+    margin-bottom: 0.3rem;
+}
 .hero-title {
-    font-size: 2.1rem; font-weight: 700; letter-spacing: -0.03em;
-    color: #f7f9fc; margin-bottom: 0.2rem;
+    font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em;
+    color: #f8fafc; margin-bottom: 0.2rem; line-height: 1.08;
 }
 .hero-subtitle {
-    color: #a8b3c7; font-size: 1rem; margin-bottom: 1.2rem;
+    color: #b3bfd4; font-size: 1.04rem; margin-bottom: 0.1rem; line-height: 1.5;
 }
 .search-shell {
-    background: rgba(18, 25, 45, 0.82);
+    background: rgba(15, 22, 38, 0.92);
     border: 1px solid rgba(124, 143, 179, 0.18);
-    border-radius: 18px;
-    padding: 1rem 1rem 0.8rem 1rem;
-    box-shadow: 0 14px 40px rgba(0,0,0,0.22);
+    border-radius: 20px;
+    padding: 1.05rem 1.05rem 0.9rem 1.05rem;
+    box-shadow: 0 18px 44px rgba(0,0,0,0.28);
     margin-bottom: 1rem;
 }
+.mode-grid, .key-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.8rem;
+    margin: 0.8rem 0 1rem 0;
+}
+.mode-card, .hint-card {
+    background: rgba(15, 22, 38, 0.86);
+    border: 1px solid rgba(124, 143, 179, 0.16);
+    border-radius: 16px;
+    padding: 0.9rem 1rem;
+}
+.mode-card h4, .hint-card h4 { margin: 0 0 0.32rem 0; color: #f8fafc; font-size: 0.98rem; }
+.mode-card p, .hint-card p { margin: 0; color: #aeb9cb; font-size: 0.88rem; line-height: 1.45; }
+.inline-note {
+    color: #a8b3c7; font-size: 0.9rem; margin-top: 0.35rem; margin-bottom: 0.2rem;
+}
 .summary-card {
-    background: rgba(18, 25, 45, 0.84);
+    background: rgba(15, 22, 38, 0.9);
     border: 1px solid rgba(124, 143, 179, 0.16);
     border-radius: 16px;
     padding: 1rem 1.1rem;
@@ -57,11 +80,11 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 .metric-chip {
     display: inline-block; padding: 0.28rem 0.62rem; border-radius: 999px;
-    background: rgba(85, 124, 255, 0.14); border: 1px solid rgba(85, 124, 255, 0.25);
-    color: #d7e4ff; font-size: 0.82rem; margin: 0 0.4rem 0.4rem 0;
+    background: rgba(83, 113, 255, 0.14); border: 1px solid rgba(83, 113, 255, 0.22);
+    color: #dbe6ff; font-size: 0.82rem; margin: 0 0.45rem 0.45rem 0;
 }
 .result-card {
-    background: rgba(18, 25, 45, 0.78);
+    background: rgba(15, 22, 38, 0.88);
     border: 1px solid rgba(124, 143, 179, 0.16);
     border-radius: 16px;
     padding: 1rem 1.05rem;
@@ -70,20 +93,41 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .result-card:hover { border-color: rgba(106, 154, 255, 0.42); }
 .result-title { color: #f7f9fc; font-size: 1.02rem; font-weight: 600; margin-bottom: 0.35rem; }
 .result-meta { color: #a8b3c7; font-size: 0.88rem; margin-bottom: 0.45rem; }
-.result-desc { color: #d8dfeb; font-size: 0.92rem; line-height: 1.45; }
+.result-desc { color: #d8dfeb; font-size: 0.92rem; line-height: 1.5; }
 .badge {
     display: inline-block; padding: 0.2rem 0.52rem; border-radius: 999px; font-size: 0.74rem;
     border: 1px solid rgba(124, 143, 179, 0.2); color: #d6ddea; background: rgba(255,255,255,0.03);
     margin-right: 0.35rem; margin-bottom: 0.35rem;
 }
 .empty-box {
-    background: rgba(18, 25, 45, 0.78);
+    background: rgba(15, 22, 38, 0.88);
     border: 1px dashed rgba(124, 143, 179, 0.22);
     border-radius: 16px; padding: 1.25rem; color: #c4cede;
 }
-.small-muted { color: #8f9bb0; font-size: 0.86rem; }
 .compact-section { margin-top: 0.75rem; }
-hr { border-color: rgba(124, 143, 179, 0.14); }
+.info-strip {
+    background: linear-gradient(135deg, rgba(25,34,58,0.92) 0%, rgba(15,22,38,0.92) 100%);
+    border: 1px solid rgba(124, 143, 179, 0.16);
+    border-radius: 16px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 1rem;
+}
+.info-strip-title { color: #f8fafc; font-weight: 600; margin-bottom: 0.18rem; }
+.info-strip-text { color: #aeb9cb; font-size: 0.9rem; line-height: 1.45; }
+.key-status {
+    color: #cfe6d5;
+    background: rgba(41, 89, 63, 0.25);
+    border: 1px solid rgba(91, 166, 116, 0.22);
+    border-radius: 12px;
+    padding: 0.55rem 0.75rem;
+    font-size: 0.88rem;
+    margin-top: 0.6rem;
+}
+.small-caption { color: #8f9bb0; font-size: 0.84rem; }
+@media (max-width: 900px) {
+    .mode-grid, .key-grid { grid-template-columns: 1fr; }
+    .hero-title { font-size: 2rem; }
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -113,7 +157,7 @@ def _normalize_filename(name: str, fmt: str) -> str:
 def _human_task(task_type: str) -> str:
     return {
         "entity_discovery": "Companies",
-        "document_research": "Research Papers",
+        "document_research": "Academic Papers",
         "people_search": "LinkedIn Profiles",
         "market_research": "Market Research",
         "entity_enrichment": "Enrichment",
@@ -216,9 +260,9 @@ def _render_company_cards(records: list[dict]):
             st.markdown(f'<div class="result-meta">{" • ".join(meta)}</div>', unsafe_allow_html=True)
         st.markdown(f'<span class="badge">{fit}</span>', unsafe_allow_html=True)
         if email:
-            st.markdown(f'<span class="badge">Email available</span>', unsafe_allow_html=True)
+            st.markdown('<span class="badge">Email available</span>', unsafe_allow_html=True)
         if phone:
-            st.markdown(f'<span class="badge">Phone available</span>', unsafe_allow_html=True)
+            st.markdown('<span class="badge">Phone available</span>', unsafe_allow_html=True)
         if website:
             st.markdown(f"<div class='compact-section'><a href='{website}' target='_blank'>Open source</a></div>", unsafe_allow_html=True)
         if desc:
@@ -237,8 +281,7 @@ def _render_paper_table(records: list[dict]):
             "Abstract": _clean(r.get("description"))[:500],
             "Source": _clean(r.get("website")) or _clean(r.get("source_url")),
         })
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, height=520)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=520)
 
 
 def _render_people_cards(records: list[dict]):
@@ -262,27 +305,71 @@ def _render_people_cards(records: list[dict]):
         st.markdown('</div>', unsafe_allow_html=True)
 
 
+def _connected_integrations(keys: dict[str, str]) -> list[str]:
+    labels = {
+        "groq": "Groq",
+        "exa": "Exa",
+        "tavily": "Tavily",
+        "serpapi": "SerpApi",
+    }
+    return [labels[k] for k, v in keys.items() if str(v).strip()]
+
+
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## Research Navigator")
-    st.caption("Professional search workspace")
+    st.markdown("## Search settings")
+    st.caption("Adjust search depth, optional integrations, and export preferences.")
 
     mode = st.radio("Search mode", ["Fast", "Balanced", "Deep"], index=1, horizontal=True)
     max_results = st.slider("Results to return", 5, 100, 25, 5)
 
     with st.expander("Optional integrations", expanded=False):
-        groq_key = st.text_input("Groq", value=_secret("GROQ_API_KEY"), type="password")
-        gemini_key = st.text_input("Gemini", value=_secret("GEMINI_API_KEY"), type="password")
-        exa_key = st.text_input("Exa", value=_secret("EXA_API_KEY"), type="password")
-        tavily_key = st.text_input("Tavily", value=_secret("TAVILY_API_KEY"), type="password")
-        serpapi_key = st.text_input("SerpApi", value=_secret("SERPAPI_KEY"), type="password")
-        firecrawl_key = st.text_input("Firecrawl", value=_secret("FIRECRAWL_API_KEY"), type="password")
-        openrouter_key = st.text_input("OpenRouter", value=_secret("OPENROUTER_API_KEY"), type="password")
-        anthropic_key = st.text_input("Anthropic", value=_secret("ANTHROPIC_API_KEY"), type="password")
-        openai_key = st.text_input("OpenAI", value=_secret("OPENAI_API_KEY"), type="password")
-        st.caption("All integrations are optional.")
+        st.markdown("**Improve coverage and ranking with optional keys**")
+        st.caption("Recommended setup: Groq + Exa or Groq + Tavily")
+
+        groq_key = st.text_input("Groq API key", value=_secret("GROQ_API_KEY"), type="password", help="Used for stronger query understanding and optional ranking.")
+        exa_key = st.text_input("Exa API key", value=_secret("EXA_API_KEY"), type="password", help="Useful for company, paper, and web discovery.")
+        tavily_key = st.text_input("Tavily API key", value=_secret("TAVILY_API_KEY"), type="password", help="Useful for broader web search coverage.")
+        serpapi_key = st.text_input("SerpApi key", value=_secret("SERPAPI_KEY"), type="password", help="Useful for Google-style search and LinkedIn discovery.")
+
+        connected = _connected_integrations({
+            "groq": groq_key,
+            "exa": exa_key,
+            "tavily": tavily_key,
+            "serpapi": serpapi_key,
+        })
+        if connected:
+            st.markdown(
+                f"<div class='key-status'>Connected integrations: {', '.join(connected)}</div>",
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("How to get these keys", expanded=False):
+            st.markdown(
+                """
+**Groq**  
+1. Create a free account at **console.groq.com**.  
+2. Open **API Keys**.  
+3. Create a new key and paste it here.
+
+**Exa**  
+1. Create an account at **exa.ai**.  
+2. Open your dashboard.  
+3. Generate an API key and paste it here.
+
+**Tavily**  
+1. Create a free account at **tavily.com**.  
+2. Open **API Keys** from your dashboard.  
+3. Copy the key and paste it here.
+
+**SerpApi**  
+1. Create an account at **serpapi.com**.  
+2. Open your dashboard.  
+3. Copy the API key and paste it here.
+                """
+            )
 
     with st.expander("Advanced settings", expanded=False):
         export_format = st.selectbox("Export format", ["xlsx", "csv", "json", "pdf"], index=0)
@@ -293,20 +380,63 @@ with st.sidebar:
 
 
 # -----------------------------------------------------------------------------
-# Header
+# Header / Hero
 # -----------------------------------------------------------------------------
+st.markdown('<div class="hero-panel">', unsafe_allow_html=True)
 st.markdown('<div class="hero-title">Research Navigator</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="hero-subtitle">Search companies, papers, people, tenders, exhibitors, and products in English or Arabic.</div>',
+    '<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, exhibitors, and products in English or Arabic.</div>',
+    unsafe_allow_html=True,
+)
+st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown(
+    """
+<div class="info-strip">
+  <div class="info-strip-title">Optional integrations improve search quality</div>
+  <div class="info-strip-text">You can use the app without keys, but adding Groq, Exa, Tavily, or SerpApi improves interpretation, coverage, and relevance. Setup instructions are available in the <strong>Optional integrations</strong> panel in the sidebar.</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+<div class="mode-grid">
+  <div class="mode-card">
+    <h4>Fast</h4>
+    <p>Quickest option for light discovery and early exploration.</p>
+  </div>
+  <div class="mode-card">
+    <h4>Balanced</h4>
+    <p>Recommended for most searches, with stronger coverage and better quality.</p>
+  </div>
+  <div class="mode-card">
+    <h4>Deep</h4>
+    <p>Best for difficult or niche searches when you want broader and more thorough retrieval.</p>
+  </div>
+</div>
+""",
     unsafe_allow_html=True,
 )
 
 st.markdown('<div class="search-shell">', unsafe_allow_html=True)
 prompt = st.text_area(
-    "What would you like to search?",
+    "What would you like to research?",
     value="",
-    height=165,
-    placeholder="Describe what you want to find in English or Arabic.\n\nمثال: ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل\n\nExample: Find software companies in food manufacturing in Germany with website and email.",
+    height=225,
+    placeholder=(
+        "Describe what you want to find in English or Arabic.\n\n"
+        "Examples:\n"
+        "• Find software companies in food manufacturing in Germany with website and email.\n"
+        "• Find academic papers about electrical submersible pumps with authors, abstract, and DOI.\n"
+        "• Find LinkedIn accounts of petroleum engineers in Saudi Arabia.\n"
+        "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
+    ),
+)
+st.markdown(
+    "<div class='inline-note'>Tip: Write your request in plain language. Research Navigator will interpret the entity type, topic, geography, and requested information automatically.</div>",
+    unsafe_allow_html=True,
 )
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
@@ -321,22 +451,13 @@ if run_btn:
 
     user_keys = {
         "groq_api_key": groq_key,
-        "gemini_api_key": gemini_key,
         "exa_api_key": exa_key,
         "tavily_api_key": tavily_key,
         "serpapi_key": serpapi_key,
-        "firecrawl_api_key": firecrawl_key,
-        "openrouter_api_key": openrouter_key,
-        "anthropic_api_key": anthropic_key,
-        "openai_api_key": openai_key,
     }
 
     llm_client = FreeLLMClient(
         groq_api_key=groq_key,
-        gemini_api_key=gemini_key,
-        openrouter_api_key=openrouter_key,
-        anthropic_api_key=anthropic_key,
-        openai_api_key=openai_key,
     )
 
     with st.spinner("Understanding your request..."):
@@ -346,7 +467,6 @@ if run_btn:
     task_spec.max_results = int(max_results)
     task_spec.output.format = export_format
     task_spec.output.filename = _normalize_filename(export_filename, export_format)
-    # Keep requested fields closer to parser output.
     if not task_spec.target_attributes:
         task_spec.target_attributes = ["website"]
 
@@ -355,13 +475,14 @@ if run_btn:
         use_exa=bool(exa_key),
         use_tavily=bool(tavily_key),
         use_serpapi=bool(serpapi_key),
-        use_firecrawl=bool(firecrawl_key),
+        use_firecrawl=False,
         use_llm_parser=bool(llm_client.available_backends()),
         use_uploaded_seed_dedupe=use_seed_dedupe,
     )
     uploaded_df = _read_file(uploaded_file)
 
     progress = st.empty()
+
     def _progress(msg: str):
         progress.caption(msg)
 
@@ -381,7 +502,6 @@ if run_btn:
     records = result.get("records", []) or []
     raw_total = int(result.get("raw_search_results", 0) or 0)
     export_path = result.get("export_path", "")
-    llm_backends = result.get("llm_backends", []) or []
 
     _render_search_summary(task_meta)
 
@@ -422,12 +542,10 @@ if run_btn:
                 st.code("\n".join(logs[-120:]) if logs else "No logs")
             with st.expander("Planned queries", expanded=False):
                 st.json(result.get("queries", {}))
-            if llm_backends:
-                st.caption("Enhanced search enabled")
     else:
         st.markdown('<div class="empty-box">', unsafe_allow_html=True)
         st.markdown("### No strong matches found yet")
         st.markdown(
-            "Try switching to **Balanced** mode, broadening the search slightly, or adding optional integrations for wider coverage."
+            "Try switching to **Balanced** mode, broadening the request slightly, or adding optional integrations for wider coverage."
         )
         st.markdown('</div>', unsafe_allow_html=True)
