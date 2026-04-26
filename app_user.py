@@ -1046,7 +1046,7 @@ if run_btn and prompt.strip():
     task_spec.geography.strict_mode = bool(has_geo and not is_ddg_only_free)
 
     if is_ddg_only_free and has_geo:
-        st.info("Free mode is running with DDG only, so geography is being treated more softly to avoid zero-result searches.")
+        st.info("Free mode is running with DDG only, so geography is being treated more softly and the minimum confidence is lowered to avoid zero-result searches.")
 
     fmt_map = {
         "Auto-detect from prompt": None,
@@ -1170,7 +1170,7 @@ if run_btn and prompt.strip():
             provider_settings=provider_settings,
             uploaded_df=uploaded_df,
             budget_overrides={},
-            min_confidence_score=int(min_conf),
+            min_confidence_score=(min(int(min_conf), 20) if is_ddg_only_free else int(min_conf)),
             user_keys=user_keys,
             progress_callback=_progress,
         )
