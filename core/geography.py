@@ -455,6 +455,45 @@ CITY_TO_COUNTRY.update({
     "المنامة": "bahrain",
 })
 
+
+# ── Arabic aliases / region variants ───────────────────────────────────────
+COUNTRY_ALIASES.setdefault("egypt", []).extend(["مصر", "جمهوريه مصر العربيه"])
+COUNTRY_ALIASES.setdefault("saudi arabia", []).extend(["السعوديه", "المملكه العربيه السعوديه"])
+COUNTRY_ALIASES.setdefault("united arab emirates", []).extend(["الامارات", "الإمارات", "الامارات العربيه المتحده"])
+COUNTRY_ALIASES.setdefault("qatar", []).extend(["قطر"])
+COUNTRY_ALIASES.setdefault("oman", []).extend(["عمان", "سلطنه عمان"])
+COUNTRY_ALIASES.setdefault("kuwait", []).extend(["الكويت"])
+COUNTRY_ALIASES.setdefault("bahrain", []).extend(["البحرين"])
+COUNTRY_ALIASES.setdefault("germany", []).extend(["المانيا", "ألمانيا"])
+COUNTRY_ALIASES.setdefault("norway", []).extend(["النرويج"])
+COUNTRY_ALIASES.setdefault("united kingdom", []).extend(["بريطانيا", "المملكه المتحده", "انجلترا"])
+COUNTRY_ALIASES.setdefault("usa", []).extend(["امريكا", "أمريكا", "الولايات المتحده", "الولايات المتحده الامريكيه"])
+
+REGION_ALIASES.setdefault("gcc", ["saudi arabia", "united arab emirates", "qatar", "oman", "kuwait", "bahrain"])
+REGION_ALIASES["gcc"] = list(dict.fromkeys(REGION_ALIASES["gcc"] + ["الخليج", "دول الخليج", "مجلس التعاون الخليجي"]))
+REGION_ALIASES.setdefault("middle east", [])
+REGION_ALIASES["middle east"] = list(dict.fromkeys(REGION_ALIASES["middle east"] + ["الشرق الاوسط", "الشرق الأوسط"]))
+REGION_ALIASES.setdefault("north africa", [])
+REGION_ALIASES["north africa"] = list(dict.fromkeys(REGION_ALIASES["north africa"] + ["شمال افريقيا", "شمال أفريقيا"]))
+REGION_ALIASES.setdefault("mena", [])
+REGION_ALIASES["mena"] = list(dict.fromkeys(REGION_ALIASES["mena"] + ["الشرق الاوسط وشمال افريقيا", "الشرق الأوسط وشمال أفريقيا"]))
+
+CITY_TO_COUNTRY.update({
+    "القاهره": "egypt",
+    "الاسكندريه": "egypt",
+    "الاسكندرية": "egypt",
+    "السويس": "egypt",
+    "دبي": "united arab emirates",
+    "ابو ظبي": "united arab emirates",
+    "الرياض": "saudi arabia",
+    "الدمام": "saudi arabia",
+    "الدوحه": "qatar",
+    "مسقط": "oman",
+    "مدينه الكويت": "kuwait",
+    "المنامه": "bahrain",
+})
+
+
 # Combined sub-national lookup: state/province/territory → country
 _SUBNATIONAL: Dict[str, str] = {}
 _SUBNATIONAL.update(US_STATES)
