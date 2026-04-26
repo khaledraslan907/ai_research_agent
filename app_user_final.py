@@ -1,23 +1,19 @@
+
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any
+import difflib
 
 import pandas as pd
 import streamlit as st
-from rapidfuzz import process, fuzz
 
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
 from core.models import ProviderSettings
 from pipeline.orchestrator import SearchOrchestrator
 
-
-# -----------------------------------------------------------------------------
-# Page
-# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Research Navigator",
     page_icon="🧭",
@@ -25,32 +21,31 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown(
-    """
+st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp {
-    background: linear-gradient(180deg, #070b14 0%, #0b1020 100%);
-    color: #e7ecf5;
-}
-.block-container {padding-top: 1.7rem; padding-bottom: 2rem; max-width: 1180px;}
-.hero-panel { background: transparent; border: none; padding: 0.25rem 0 0.55rem 0; margin-bottom: 0.25rem; }
-.hero-title {
-    font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em;
-    color: #f8fafc; margin-bottom: 0.2rem; line-height: 1.08;
-}
-.hero-subtitle {
-    color: #b3bfd4; font-size: 1.04rem; margin-bottom: 0.1rem; line-height: 1.5;
-}
+.stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
+.block-container {padding-top: 1.6rem; padding-bottom: 2rem; max-width: 1180px;}
+.hero-title { font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc; margin-bottom: 0.2rem; line-height: 1.08; }
+.hero-subtitle { color: #b3bfd4; font-size: 1.04rem; margin-bottom: 0.95rem; line-height: 1.5; }
 .search-shell {
     background: rgba(15, 22, 38, 0.92);
     border: 1px solid rgba(124, 143, 179, 0.18);
     border-radius: 20px;
-    padding: 1.05rem 1.05rem 0.9rem 1.05rem;
+    padding: 1.05rem 1.05rem 0.95rem 1.05rem;
     box-shadow: 0 18px 44px rgba(0,0,0,0.28);
     margin-bottom: 1rem;
 }
+.info-strip {
+    background: linear-gradient(135deg, rgba(25,34,58,0.92) 0%, rgba(15,22,38,0.92) 100%);
+    border: 1px solid rgba(124, 143, 179, 0.16);
+    border-radius: 16px;
+    padding: 0.9rem 1rem;
+    margin-bottom: 1rem;
+}
+.info-strip-title { color: #f8fafc; font-weight: 600; margin-bottom: 0.18rem; }
+.info-strip-text { color: #aeb9cb; font-size: 0.9rem; line-height: 1.45; }
 .summary-card {
     background: rgba(15, 22, 38, 0.9);
     border: 1px solid rgba(124, 143, 179, 0.16);
@@ -84,65 +79,24 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     border: 1px dashed rgba(124, 143, 179, 0.22);
     border-radius: 16px; padding: 1.25rem; color: #c4cede;
 }
-.compact-section { margin-top: 0.75rem; }
-.info-strip {
-    background: linear-gradient(135deg, rgba(25,34,58,0.92) 0%, rgba(15,22,38,0.92) 100%);
-    border: 1px solid rgba(124, 143, 179, 0.16);
-    border-radius: 16px;
-    padding: 0.9rem 1rem;
-    margin-bottom: 1rem;
+.mode-label { color: #f8fafc; font-weight: 600; margin-bottom: 0.55rem; }
+.mode-card {
+    border-radius: 14px; padding: 0.55rem 0.2rem; text-align: center;
+    border: 1px solid rgba(124, 143, 179, 0.22); background: rgba(255,255,255,0.02);
 }
-.info-strip-title { color: #f8fafc; font-weight: 600; margin-bottom: 0.18rem; }
-.info-strip-text { color: #aeb9cb; font-size: 0.9rem; line-height: 1.45; }
+.mode-selected {
+    border-color: rgba(99, 131, 255, 0.65);
+    background: rgba(83, 113, 255, 0.18);
+    box-shadow: inset 0 0 0 1px rgba(99, 131, 255, 0.18);
+}
+.mode-name { color: #f7f9fc; font-size: 1rem; font-weight: 700; margin-bottom: 0.05rem; }
 .key-status {
-    color: #d7eadc;
-    background: rgba(41, 89, 63, 0.22);
-    border: 1px solid rgba(91, 166, 116, 0.18);
-    border-radius: 12px;
-    padding: 0.55rem 0.75rem;
-    font-size: 0.88rem;
-    margin-top: 0.6rem;
+    color: #d7eadc; background: rgba(41, 89, 63, 0.22); border: 1px solid rgba(91, 166, 116, 0.18);
+    border-radius: 12px; padding: 0.55rem 0.75rem; font-size: 0.88rem; margin-top: 0.6rem;
 }
-.small-caption { color: #8f9bb0; font-size: 0.84rem; }
-.mode-note { color: #aeb9cb; font-size: 0.85rem; margin-top: 0.45rem; }
-.suggest-line {
-    color: #aeb9cb;
-    font-size: 0.89rem;
-    margin: 0.55rem 0 0.1rem 0;
-    line-height: 1.45;
-}
-/* better sidebar mode buttons */
-div[data-testid="stSidebar"] button[kind="secondary"] {
-    white-space: nowrap !important;
-}
-@media (max-width: 900px) {
-    .hero-title { font-size: 2rem; }
-}
+.stButton > button { border-radius: 12px; }
 </style>
-<script>
-window.addEventListener('load', function() {
-  const setSpell = () => {
-    const areas = window.parent.document.querySelectorAll('textarea');
-    areas.forEach(a => a.setAttribute('spellcheck', 'true'));
-  };
-  setSpell();
-  setTimeout(setSpell, 800);
-});
-</script>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-SUGGEST_TERMS = [
-    "software", "companies", "service", "engineering", "academic", "papers",
-    "linkedin", "accounts", "profiles", "tenders", "exhibitors", "products",
-    "germany", "egypt", "saudi arabia", "norway", "food manufacturing",
-    "electrical submersible pump", "wireline", "slickline", "well logging",
-]
+""", unsafe_allow_html=True)
 
 
 def _secret(key: str, default: str = "") -> str:
@@ -150,10 +104,6 @@ def _secret(key: str, default: str = "") -> str:
         return st.secrets.get(key, "") or os.getenv(key, default)
     except Exception:
         return os.getenv(key, default)
-
-
-def _resolve_key(entered: str, secret_name: str) -> str:
-    return (entered or "").strip() or _secret(secret_name)
 
 
 def _normalize_filename(name: str, fmt: str) -> str:
@@ -235,7 +185,6 @@ def _render_search_summary(task_spec: dict):
         st.markdown(f'<span class="metric-chip">Exclude HQ: {", ".join(exc)}</span>', unsafe_allow_html=True)
     if excp:
         st.markdown(f'<span class="metric-chip">Exclude presence: {", ".join(excp)}</span>', unsafe_allow_html=True)
-
     requested = [str(x) for x in (task_spec.get("target_attributes") or []) if str(x).strip()]
     if requested:
         st.caption("Requested info: " + ", ".join(requested))
@@ -318,124 +267,103 @@ def _render_people_cards(records: list[dict]):
 
 
 def _connected_integrations(keys: dict[str, str]) -> list[str]:
-    labels = {
-        "groq": "Groq",
-        "gemini": "Gemini",
-        "exa": "Exa",
-        "tavily": "Tavily",
-        "serpapi": "SerpApi",
-    }
+    labels = {"groq": "Groq", "gemini": "Gemini", "exa": "Exa", "tavily": "Tavily", "serpapi": "SerpApi"}
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
-def _typing_hints(text: str) -> list[str]:
-    cleaned = (text or "").strip()
-    if len(cleaned) < 4:
-        return []
-    tokens = re.findall(r"[A-Za-z\u0600-\u06FF][A-Za-z\u0600-\u06FF\- ]+", cleaned.lower())
-    hints: list[str] = []
-    for token in tokens[-6:]:
-        tok = token.strip()
-        if len(tok) < 4:
-            continue
-        match = process.extractOne(tok, SUGGEST_TERMS, scorer=fuzz.WRatio)
-        if match and match[1] >= 88 and match[0].lower() != tok.lower():
-            hints.append(f"{tok} → {match[0]}")
-    # unique preserve
-    out = []
+COMMON_TERMS = [
+    "describe", "search", "companies", "company", "academic", "papers", "paper",
+    "linkedin", "accounts", "account", "profiles", "profile", "tenders", "products",
+    "exhibitors", "website", "email", "phone", "germany", "egypt", "saudi",
+    "arabia", "software", "manufacturing", "electrical", "submersible", "pump",
+    "pumps", "petroleum", "engineers", "engineer", "find", "with", "about", "what"
+]
+
+
+def _suggest_corrections(text: str) -> list[tuple[str, str]]:
+    tokens = [t.strip(".,:;!?()[]{}\"'").lower() for t in text.split()]
+    suggestions = []
     seen = set()
-    for h in hints:
-        if h not in seen:
-            seen.add(h)
-            out.append(h)
-    return out[:3]
+    for tok in tokens:
+        if len(tok) < 4 or tok in COMMON_TERMS:
+            continue
+        match = difflib.get_close_matches(tok, COMMON_TERMS, n=1, cutoff=0.78)
+        if match and (tok, match[0]) not in seen:
+            seen.add((tok, match[0]))
+            suggestions.append((tok, match[0]))
+    return suggestions[:4]
 
 
-# -----------------------------------------------------------------------------
-# Sidebar
-# -----------------------------------------------------------------------------
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
 mode_help = {
-    "Fast": "Quick search",
-    "Balanced": "Best overall",
-    "Deep": "Broader search",
+    "Fast": "Quickest option for light discovery.",
+    "Balanced": "Recommended for most searches.",
+    "Deep": "Best for difficult or niche searches.",
 }
-
-if "rn_mode" not in st.session_state:
-    st.session_state["rn_mode"] = "Balanced"
+if "mode" not in st.session_state:
+    st.session_state.mode = "Balanced"
 
 with st.sidebar:
     st.markdown("## Search settings")
     st.caption("Choose a search mode and optional integrations.")
 
-    st.markdown("**Search mode**")
-    c1, c2, c3 = st.columns([1, 1.55, 1])
-    if c1.button("Fast ?", help=mode_help["Fast"], use_container_width=True):
-        st.session_state["rn_mode"] = "Fast"
-    if c2.button("Balanced ?", help=mode_help["Balanced"], use_container_width=True):
-        st.session_state["rn_mode"] = "Balanced"
-    if c3.button("Deep ?", help=mode_help["Deep"], use_container_width=True):
-        st.session_state["rn_mode"] = "Deep"
+    st.markdown('<div class="mode-label">Search mode</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1.0, 1.45, 1.0], gap="small")
 
-    mode = st.session_state["rn_mode"]
+    def _mode_button(col, name, help_text):
+        selected = st.session_state.mode == name
+        col.markdown(
+            f'<div class="mode-card {"mode-selected" if selected else ""}"><div class="mode-name">{name}</div></div>',
+            unsafe_allow_html=True,
+        )
+        if col.button(name, key=f"mode_{name}", help=help_text, use_container_width=True):
+            st.session_state.mode = name
+            st.rerun()
+
+    _mode_button(c1, "Fast", mode_help["Fast"])
+    _mode_button(c2, "Balanced", mode_help["Balanced"])
+    _mode_button(c3, "Deep", mode_help["Deep"])
+
+    mode = st.session_state.mode
     max_results = mode_defaults[mode]
-    st.markdown(f"<div class='mode-note'>Selected mode: <strong>{mode}</strong></div>", unsafe_allow_html=True)
 
     with st.expander("Optional integrations", expanded=False):
         st.markdown("**Optional keys for stronger search quality**")
         st.caption("Recommended setup: Groq or Gemini for interpretation, plus Exa or Tavily for broader coverage.")
 
-        groq_key = st.text_input("Groq API key", value="", type="password", placeholder="Paste key (optional)")
-        gemini_key = st.text_input("Gemini API key", value="", type="password", placeholder="Paste key (optional)")
-        exa_key = st.text_input("Exa API key", value="", type="password", placeholder="Paste key (optional)")
-        tavily_key = st.text_input("Tavily API key", value="", type="password", placeholder="Paste key (optional)")
-        serpapi_key = st.text_input("SerpApi key", value="", type="password", placeholder="Paste key (optional)")
+        groq_key = st.text_input("Groq API key", value="", type="password")
+        gemini_key = st.text_input("Gemini API key", value="", type="password")
+        exa_key = st.text_input("Exa API key", value="", type="password")
+        tavily_key = st.text_input("Tavily API key", value="", type="password")
+        serpapi_key = st.text_input("SerpApi key", value="", type="password")
 
         connected = _connected_integrations({
-            "groq": groq_key,
-            "gemini": gemini_key,
-            "exa": exa_key,
-            "tavily": tavily_key,
-            "serpapi": serpapi_key,
+            "groq": groq_key or _secret("GROQ_API_KEY"),
+            "gemini": gemini_key or _secret("GEMINI_API_KEY"),
+            "exa": exa_key or _secret("EXA_API_KEY"),
+            "tavily": tavily_key or _secret("TAVILY_API_KEY"),
+            "serpapi": serpapi_key or _secret("SERPAPI_KEY"),
         })
         if connected:
-            st.markdown(
-                f"<div class='key-status'>Connected: {', '.join(connected)}</div>",
-                unsafe_allow_html=True,
-            )
+            st.markdown(f"<div class='key-status'>Connected: {', '.join(connected)}</div>", unsafe_allow_html=True)
 
         with st.expander("How to get keys", expanded=False):
             st.markdown(
                 """
-**[Groq — API Keys](https://console.groq.com/keys)**  
-1. Create a free account or sign in.  
-2. Open the **API Keys** page.  
-3. Click **Create API Key**.  
-4. Copy the key and paste it here.
+**[Groq](https://console.groq.com/keys)**  
+Create a free account → open **API Keys** → create a key → paste it here.
 
-**[Gemini — Google AI Studio API Keys](https://aistudio.google.com/app/apikey)**  
-1. Sign in with your Google account.  
-2. Open the **API key** page in Google AI Studio.  
-3. Create a key.  
-4. Copy the key and paste it here.
+**[Gemini](https://aistudio.google.com/app/apikey)**  
+Open **Google AI Studio** → create an API key → paste it here.
 
-**[Exa — Dashboard API Keys](https://dashboard.exa.ai/api-keys)**  
-1. Create an account or sign in.  
-2. Open your **API Keys** page.  
-3. Click **Create Key**.  
-4. Copy the key and paste it here.
+**[Exa](https://dashboard.exa.ai/api-keys)**  
+Create an account → open your dashboard → generate an API key → paste it here.
 
-**[Tavily — Platform](https://app.tavily.com/home)**  
-1. Create a free account or sign in.  
-2. Open your dashboard.  
-3. Copy one of your API keys.  
-4. Paste it here.
+**[Tavily](https://docs.tavily.com/documentation/quickstart)**  
+Create a free account → open **API Keys** → copy your key → paste it here.
 
-**[SerpApi — Sign in / Dashboard](https://serpapi.com/users/sign_in)**  
-1. Create an account or sign in.  
-2. Open your dashboard.  
-3. Copy your API key.  
-4. Paste it here.
+**[SerpApi](https://serpapi.com/users/sign_in)**  
+Create an account → open your dashboard → copy the API key → paste it here.
                 """
             )
 
@@ -446,32 +374,20 @@ with st.sidebar:
         uploaded_file = st.file_uploader("Existing list for deduplication", type=["csv", "xlsx"])
         use_seed_dedupe = st.checkbox("Use uploaded file for deduplication", value=True)
 
-
-# -----------------------------------------------------------------------------
-# Header / Hero
-# -----------------------------------------------------------------------------
-st.markdown('<div class="hero-panel">', unsafe_allow_html=True)
 st.markdown('<div class="hero-title">Research Navigator</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, exhibitors, and products in English or Arabic.</div>',
-    unsafe_allow_html=True,
-)
-st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, exhibitors, and products in English or Arabic.</div>', unsafe_allow_html=True)
 
-st.markdown(
-    """
+st.markdown("""
 <div class="info-strip">
   <div class="info-strip-title">Optional integrations can improve search quality</div>
   <div class="info-strip-text">For broader coverage and stronger interpretation, add Groq, Gemini, Exa, Tavily, or SerpApi from the <strong>Optional integrations</strong> section in the sidebar.</div>
 </div>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 st.markdown('<div class="search-shell">', unsafe_allow_html=True)
 prompt = st.text_area(
     "What would you like to research?",
-    value="",
+    value=st.session_state.get("prompt_value", ""),
     height=235,
     placeholder=(
         "Describe what you want to find in English or Arabic.\n\n"
@@ -482,42 +398,30 @@ prompt = st.text_area(
         "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
     ),
 )
-
-hints = _typing_hints(prompt)
-if hints:
-    st.markdown(
-        "<div class='suggest-line'><strong>Did you mean:</strong> " + " • ".join(hints) + "</div>",
-        unsafe_allow_html=True,
-    )
-
+corrections = _suggest_corrections(prompt)
+if corrections:
+    rendered = " · ".join([f"“{bad}” → “{good}”" for bad, good in corrections])
+    st.caption(f"Suggestions: {rendered}")
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-
-# -----------------------------------------------------------------------------
-# Run search
-# -----------------------------------------------------------------------------
 if run_btn:
     if not prompt.strip():
         st.stop()
 
-    resolved_groq = _resolve_key(groq_key, "GROQ_API_KEY")
-    resolved_gemini = _resolve_key(gemini_key, "GEMINI_API_KEY")
-    resolved_exa = _resolve_key(exa_key, "EXA_API_KEY")
-    resolved_tavily = _resolve_key(tavily_key, "TAVILY_API_KEY")
-    resolved_serpapi = _resolve_key(serpapi_key, "SERPAPI_KEY")
+    st.session_state["prompt_value"] = prompt
 
     user_keys = {
-        "groq_api_key": resolved_groq,
-        "gemini_api_key": resolved_gemini,
-        "exa_api_key": resolved_exa,
-        "tavily_api_key": resolved_tavily,
-        "serpapi_key": resolved_serpapi,
+        "groq_api_key": groq_key or _secret("GROQ_API_KEY"),
+        "gemini_api_key": gemini_key or _secret("GEMINI_API_KEY"),
+        "exa_api_key": exa_key or _secret("EXA_API_KEY"),
+        "tavily_api_key": tavily_key or _secret("TAVILY_API_KEY"),
+        "serpapi_key": serpapi_key or _secret("SERPAPI_KEY"),
     }
 
     llm_client = FreeLLMClient(
-        groq_api_key=resolved_groq,
-        gemini_api_key=resolved_gemini,
+        groq_api_key=user_keys["groq_api_key"],
+        gemini_api_key=user_keys["gemini_api_key"],
     )
 
     with st.spinner("Understanding your request..."):
@@ -532,9 +436,9 @@ if run_btn:
 
     provider_settings = ProviderSettings(
         use_ddg=True,
-        use_exa=bool(resolved_exa),
-        use_tavily=bool(resolved_tavily),
-        use_serpapi=bool(resolved_serpapi),
+        use_exa=bool(user_keys["exa_api_key"]),
+        use_tavily=bool(user_keys["tavily_api_key"]),
+        use_serpapi=bool(user_keys["serpapi_key"]),
         use_firecrawl=False,
         use_llm_parser=bool(llm_client.available_backends()),
         use_uploaded_seed_dedupe=use_seed_dedupe,
@@ -605,7 +509,5 @@ if run_btn:
     else:
         st.markdown('<div class="empty-box">', unsafe_allow_html=True)
         st.markdown("### No strong matches found yet")
-        st.markdown(
-            "Try switching to **Balanced** mode, broadening the request slightly, or adding optional integrations for wider coverage."
-        )
+        st.markdown("Try switching to **Balanced** mode, broadening the request slightly, or adding optional integrations for wider coverage.")
         st.markdown('</div>', unsafe_allow_html=True)
