@@ -106,11 +106,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     font-size: 0.88rem;
     margin-top: 0.6rem;
 }
-.mode-hint {
-    margin-top: 0.45rem;
-    color: #aeb9cb;
-    font-size: 0.88rem;
-    line-height: 1.45;
+.suggest-label {
+    color: #93a0b7; font-size: 0.88rem; margin-top: 0.45rem; margin-bottom: 0.35rem;
 }
 .small-caption { color: #8f9bb0; font-size: 0.84rem; }
 @media (max-width: 900px) {
@@ -304,24 +301,32 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
+def _apply_suggestion(text: str):
+    st.session_state["rn_prompt"] = text
+
+
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
-mode_help = {
-    "Fast": "Quickest option for light discovery and early exploration.",
-    "Balanced": "Recommended for most searches, with stronger coverage and better overall quality.",
-    "Deep": "Best for difficult or niche searches when you want broader and more thorough retrieval.",
-}
+mode_help_text = (
+    "Fast: quickest option for light discovery.  "
+    "Balanced: recommended for most searches with stronger coverage and better overall quality.  "
+    "Deep: best for difficult or niche searches when you want broader and more thorough retrieval."
+)
 
 with st.sidebar:
     st.markdown("## Search settings")
     st.caption("Choose a search mode and optional integrations.")
 
-    mode = st.radio("Search mode", ["Fast", "Balanced", "Deep"], index=1, horizontal=True)
+    mode = st.radio(
+        "Search mode",
+        ["Fast", "Balanced", "Deep"],
+        index=1,
+        horizontal=True,
+        help=mode_help_text,
+    )
     max_results = mode_defaults[mode]
-    st.markdown(f"<div class='mode-hint'>{mode_help[mode]}</div>", unsafe_allow_html=True)
-    st.caption(f"Target results for {mode.lower()} mode: {max_results}")
 
     with st.expander("Optional integrations", expanded=False):
         st.markdown("**Optional keys for stronger search quality**")
@@ -410,10 +415,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if "rn_prompt" not in st.session_state:
+    st.session_state["rn_prompt"] = ""
+
 st.markdown('<div class="search-shell">', unsafe_allow_html=True)
 prompt = st.text_area(
     "What would you like to research?",
-    value="",
+    key="rn_prompt",
     height=235,
     placeholder=(
         "Describe what you want to find in English or Arabic.\n\n"
@@ -424,6 +432,22 @@ prompt = st.text_area(
         "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
     ),
 )
+
+st.markdown("<div class='suggest-label'>Suggestions</div>", unsafe_allow_html=True)
+s1, s2, s3, s4 = st.columns(4)
+if s1.button("Food manufacturing software", use_container_width=True):
+    _apply_suggestion("Find software companies in food manufacturing in Germany with website and email.")
+    st.rerun()
+if s2.button("Academic papers on ESP", use_container_width=True):
+    _apply_suggestion("Find academic papers about electrical submersible pumps with authors and abstract.")
+    st.rerun()
+if s3.button("LinkedIn accounts", use_container_width=True):
+    _apply_suggestion("Find LinkedIn accounts of petroleum engineers in Saudi Arabia.")
+    st.rerun()
+if s4.button("Arabic company search", use_container_width=True):
+    _apply_suggestion("ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل.")
+    st.rerun()
+
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
