@@ -106,10 +106,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     font-size: 0.88rem;
     margin-top: 0.6rem;
 }
-.suggest-label {
-    color: #93a0b7; font-size: 0.88rem; margin-top: 0.45rem; margin-bottom: 0.35rem;
-}
 .small-caption { color: #8f9bb0; font-size: 0.84rem; }
+.mode-note { color: #aeb9cb; font-size: 0.85rem; margin-top: 0.45rem; }
 @media (max-width: 900px) {
     .hero-title { font-size: 2rem; }
 }
@@ -127,6 +125,10 @@ def _secret(key: str, default: str = "") -> str:
         return st.secrets.get(key, "") or os.getenv(key, default)
     except Exception:
         return os.getenv(key, default)
+
+
+def _resolve_key(entered: str, secret_name: str) -> str:
+    return (entered or "").strip() or _secret(secret_name)
 
 
 def _normalize_filename(name: str, fmt: str) -> str:
@@ -301,42 +303,45 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
-def _apply_suggestion(text: str):
-    st.session_state["rn_prompt"] = text
-
-
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
-mode_help_text = (
-    "Fast: quickest option for light discovery.  "
-    "Balanced: recommended for most searches with stronger coverage and better overall quality.  "
-    "Deep: best for difficult or niche searches when you want broader and more thorough retrieval."
-)
+mode_help = {
+    "Fast": "Quickest option for light discovery and early exploration.",
+    "Balanced": "Recommended for most searches with broader coverage and stronger quality.",
+    "Deep": "Best for difficult or niche searches when you want more thorough retrieval.",
+}
+
+if "rn_mode" not in st.session_state:
+    st.session_state["rn_mode"] = "Balanced"
 
 with st.sidebar:
     st.markdown("## Search settings")
     st.caption("Choose a search mode and optional integrations.")
 
-    mode = st.radio(
-        "Search mode",
-        ["Fast", "Balanced", "Deep"],
-        index=1,
-        horizontal=True,
-        help=mode_help_text,
-    )
+    st.markdown("**Search mode**")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Fast", help=mode_help["Fast"], use_container_width=True):
+        st.session_state["rn_mode"] = "Fast"
+    if c2.button("Balanced", help=mode_help["Balanced"], use_container_width=True):
+        st.session_state["rn_mode"] = "Balanced"
+    if c3.button("Deep", help=mode_help["Deep"], use_container_width=True):
+        st.session_state["rn_mode"] = "Deep"
+
+    mode = st.session_state["rn_mode"]
     max_results = mode_defaults[mode]
+    st.markdown(f"<div class='mode-note'>Selected mode: <strong>{mode}</strong></div>", unsafe_allow_html=True)
 
     with st.expander("Optional integrations", expanded=False):
         st.markdown("**Optional keys for stronger search quality**")
         st.caption("Recommended setup: Groq or Gemini for interpretation, plus Exa or Tavily for broader coverage.")
 
-        groq_key = st.text_input("Groq API key", value=_secret("GROQ_API_KEY"), type="password")
-        gemini_key = st.text_input("Gemini API key", value=_secret("GEMINI_API_KEY"), type="password")
-        exa_key = st.text_input("Exa API key", value=_secret("EXA_API_KEY"), type="password")
-        tavily_key = st.text_input("Tavily API key", value=_secret("TAVILY_API_KEY"), type="password")
-        serpapi_key = st.text_input("SerpApi key", value=_secret("SERPAPI_KEY"), type="password")
+        groq_key = st.text_input("Groq API key", value="", type="password", placeholder="Paste key (optional)")
+        gemini_key = st.text_input("Gemini API key", value="", type="password", placeholder="Paste key (optional)")
+        exa_key = st.text_input("Exa API key", value="", type="password", placeholder="Paste key (optional)")
+        tavily_key = st.text_input("Tavily API key", value="", type="password", placeholder="Paste key (optional)")
+        serpapi_key = st.text_input("SerpApi key", value="", type="password", placeholder="Paste key (optional)")
 
         connected = _connected_integrations({
             "groq": groq_key,
@@ -415,13 +420,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if "rn_prompt" not in st.session_state:
-    st.session_state["rn_prompt"] = ""
-
 st.markdown('<div class="search-shell">', unsafe_allow_html=True)
 prompt = st.text_area(
     "What would you like to research?",
-    key="rn_prompt",
+    value="",
     height=235,
     placeholder=(
         "Describe what you want to find in English or Arabic.\n\n"
@@ -432,22 +434,6 @@ prompt = st.text_area(
         "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
     ),
 )
-
-st.markdown("<div class='suggest-label'>Suggestions</div>", unsafe_allow_html=True)
-s1, s2, s3, s4 = st.columns(4)
-if s1.button("Food manufacturing software", use_container_width=True):
-    _apply_suggestion("Find software companies in food manufacturing in Germany with website and email.")
-    st.rerun()
-if s2.button("Academic papers on ESP", use_container_width=True):
-    _apply_suggestion("Find academic papers about electrical submersible pumps with authors and abstract.")
-    st.rerun()
-if s3.button("LinkedIn accounts", use_container_width=True):
-    _apply_suggestion("Find LinkedIn accounts of petroleum engineers in Saudi Arabia.")
-    st.rerun()
-if s4.button("Arabic company search", use_container_width=True):
-    _apply_suggestion("ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل.")
-    st.rerun()
-
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -459,17 +445,23 @@ if run_btn:
     if not prompt.strip():
         st.stop()
 
+    resolved_groq = _resolve_key(groq_key, "GROQ_API_KEY")
+    resolved_gemini = _resolve_key(gemini_key, "GEMINI_API_KEY")
+    resolved_exa = _resolve_key(exa_key, "EXA_API_KEY")
+    resolved_tavily = _resolve_key(tavily_key, "TAVILY_API_KEY")
+    resolved_serpapi = _resolve_key(serpapi_key, "SERPAPI_KEY")
+
     user_keys = {
-        "groq_api_key": groq_key,
-        "gemini_api_key": gemini_key,
-        "exa_api_key": exa_key,
-        "tavily_api_key": tavily_key,
-        "serpapi_key": serpapi_key,
+        "groq_api_key": resolved_groq,
+        "gemini_api_key": resolved_gemini,
+        "exa_api_key": resolved_exa,
+        "tavily_api_key": resolved_tavily,
+        "serpapi_key": resolved_serpapi,
     }
 
     llm_client = FreeLLMClient(
-        groq_api_key=groq_key,
-        gemini_api_key=gemini_key,
+        groq_api_key=resolved_groq,
+        gemini_api_key=resolved_gemini,
     )
 
     with st.spinner("Understanding your request..."):
@@ -484,9 +476,9 @@ if run_btn:
 
     provider_settings = ProviderSettings(
         use_ddg=True,
-        use_exa=bool(exa_key),
-        use_tavily=bool(tavily_key),
-        use_serpapi=bool(serpapi_key),
+        use_exa=bool(resolved_exa),
+        use_tavily=bool(resolved_tavily),
+        use_serpapi=bool(resolved_serpapi),
         use_firecrawl=False,
         use_llm_parser=bool(llm_client.available_backends()),
         use_uploaded_seed_dedupe=use_seed_dedupe,
