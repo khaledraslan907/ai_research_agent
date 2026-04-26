@@ -37,6 +37,13 @@ except Exception:
         return None
 
 from pipeline.orchestrator import SearchOrchestrator
+from actions.compare import build_comparison_table
+from actions.cluster import cluster_records_by_field, cluster_records_by_keyword
+from actions.extract_contacts import extract_contacts_from_records
+from actions.extract_locations import extract_locations_from_records, summarize_geo_footprint
+from actions.extract_authors import extract_authors_from_records
+from actions.outreach_brief import build_outreach_brief
+from actions.summarize import summarize_records
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -311,17 +318,6 @@ def _humanize_task_type(task_type: str) -> str:
     }.get(task_type, "🔍 Entities")
 
 
-def _humanize_entity_type(entity_type: str) -> str:
-    return {
-        "company": "🏢 Companies",
-        "paper": "📄 Papers",
-        "person": "👥 People",
-        "tender": "📑 Tenders",
-        "event": "🎪 Events",
-        "product": "🧰 Products",
-    }.get((entity_type or "company").strip(), "🔍 Entities")
-
-
 def _humanize_target_category(category: str) -> str:
     return {
         "software_company": "Digital / software companies",
@@ -337,6 +333,34 @@ def _humanize_commercial_intent(value: str) -> str:
         "reseller": "Reseller",
         "partner": "Partner / channel partner",
     }.get((value or "general").strip(), (value or "general").replace("_", " ").title())
+
+
+def _entity_type_from_task_meta(task_meta: dict) -> str:
+    task_type = str(task_meta.get("task_type", "") or "").strip().lower()
+    if task_type == "document_research":
+        return "paper"
+    if task_type == "people_search":
+        return "person"
+    return "company"
+
+
+def _safe_top_records(records: list[dict], top_n: int = 10) -> list[dict]:
+    rows = list(records or [])
+    try:
+        rows = sorted(rows, key=lambda r: float(r.get("confidence_score", 0) or 0), reverse=True)
+    except Exception:
+        pass
+    return rows[: max(1, int(top_n))]
+
+
+def _cluster_count_rows(cluster_map: dict) -> pd.DataFrame:
+    rows = []
+    for key, items in (cluster_map or {}).items():
+        rows.append({"Cluster": key, "Count": len(items or [])})
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["Count", "Cluster"], ascending=[False, True])
+    return df
 
 
 _DIGITAL_CATEGORY_HINTS = (
@@ -893,7 +917,7 @@ with st.sidebar:
         col1, col2 = st.columns(2)
         field_website = col1.checkbox("Website", value=True)
         field_email = col1.checkbox("Email", value=True)
-        field_phone = col1.checkbox("Phone", value=True)
+        field_phone = col1.checkbox("Phone", value=False)
         field_linkedin = col2.checkbox("LinkedIn URL", value=False)
         field_hq = col2.checkbox("HQ Country", value=False)
         field_summary = col2.checkbox("Summary", value=False)
@@ -995,9 +1019,8 @@ if run_btn and prompt.strip():
     if field_summary:
         user_fields.append("summary")
 
-    base_attrs = list(dict.fromkeys(list(getattr(task_spec, "target_attributes", []) or [])))
+    base_attrs = list(dict.fromkeys(list(getattr(task_spec, "target_attributes", []) or ["website"])))
 
-    entity_type = (getattr(task_spec, "target_entity_types", ["company"]) or ["company"])[0]
     if task_spec.task_type == "document_research":
         task_spec.target_attributes = sorted(set([
             "website", "summary", "author", "authors", "year",
@@ -1005,10 +1028,21 @@ if run_btn and prompt.strip():
         ] + user_fields + base_attrs))
     elif task_spec.task_type == "people_search":
         task_spec.target_attributes = list(dict.fromkeys(["linkedin", "website"] + user_fields + base_attrs))
-    elif entity_type == "tender":
-        task_spec.target_attributes = list(dict.fromkeys(base_attrs + (["website"] if not user_fields else []) + user_fields))
     else:
-        task_spec.target_attributes = list(dict.fromkeys(base_attrs + (["website"] if not user_fields else []) + user_fields))
+        explicit_extra = []
+        if field_website and "website" not in base_attrs:
+            explicit_extra.append("website")
+        if field_email and "email" not in base_attrs:
+            explicit_extra.append("email")
+        if field_phone and "phone" not in base_attrs:
+            explicit_extra.append("phone")
+        if field_linkedin and "linkedin" not in base_attrs:
+            explicit_extra.append("linkedin")
+        if field_hq and "hq_country" not in base_attrs:
+            explicit_extra.append("hq_country")
+        if field_summary and "summary" not in base_attrs:
+            explicit_extra.append("summary")
+        task_spec.target_attributes = list(dict.fromkeys(base_attrs + explicit_extra))
 
     if not task_spec.industry or len(task_spec.industry.strip()) < 2:
         st.error(
@@ -1020,7 +1054,7 @@ if run_btn and prompt.strip():
     geo = task_spec.geography
     with st.container():
         c1, c2, c3, c4 = st.columns(4)
-        c1.info(f"**Looking for:** {_humanize_entity_type((getattr(task_spec, 'target_entity_types', ['company']) or ['company'])[0])}")
+        c1.info(f"**Looking for:** {_humanize_task_type(task_spec.task_type)}")
         c2.info(f"**Category:** {_humanize_target_category(getattr(task_spec, 'target_category', 'general'))}")
         c3.info(f"**Industry:** {task_spec.industry}")
         c4.info(f"**Target:** {max_results} results in {mode} mode")
@@ -1137,12 +1171,23 @@ if result and task_meta:
     rej = len(result.get("rejected_records", []))
     b = result.get("budget", {})
     all_records = result.get("records", []) or []
+    critic_issues = result.get("critic_issues", []) or []
+    gap_report = result.get("gap_report", {}) or {}
+    verification = result.get("verification", {}) or {}
+    provider_selection = result.get("provider_selection", {}) or {}
+    discovery_meta = result.get("discovery", {}) or {}
     is_people = task_meta["task_type"] == "people_search"
     is_papers = task_meta["task_type"] == "document_research"
 
     refined_records, app_removed = _refine_company_records(all_records, task_meta)
     records = all_records if (is_people or is_papers) else refined_records
     total = len(records)
+
+    top_critic = [x for x in critic_issues if str(x.get("severity", "")).lower() in {"warning", "error"}]
+    if top_critic:
+        st.warning(" · ".join(f"{x.get('code', 'issue')}: {x.get('message', '')}" for x in top_critic[:2]))
+    if gap_report.get("recommendations"):
+        st.info("Gap analysis: " + " | ".join(gap_report.get("recommendations", [])[:2]))
 
     if (not is_people and not is_papers) and total == 0 and len(all_records) > 0:
         if task_meta.get("include_countries") or task_meta.get("exclude_presence_countries") or task_meta.get("exclude_countries"):
@@ -1210,9 +1255,9 @@ if result and task_meta:
             df_display = df_display.sort_values("Score", ascending=False)
 
     if is_papers:
-        section_labels = {"results": f"📊 Results ({total})", "summaries": "📝 AI Summaries", "download": "⬇️ Download", "details": "🔍 Search Details"}
+        section_labels = {"results": f"📊 Results ({total})", "actions": "🧰 Actions", "summaries": "📝 AI Summaries", "download": "⬇️ Download", "details": "🔍 Search Details"}
     else:
-        section_labels = {"results": f"📊 Results ({total})", "download": "⬇️ Download", "details": "🔍 Search Details"}
+        section_labels = {"results": f"📊 Results ({total})", "actions": "🧰 Actions", "download": "⬇️ Download", "details": "🔍 Search Details"}
 
     section_options = list(section_labels.keys())
     if st.session_state.get("active_section") not in section_options:
@@ -1330,6 +1375,118 @@ if result and task_meta:
                 c1.warning("Install reportlab to enable PDF summaries.")
             c2.download_button("📄 Text (.txt)", data=txt_bytes, file_name=f"summaries_{fn}.txt", mime="text/plain", use_container_width=True)
 
+    elif selected_section == "actions":
+        st.markdown("### 🧰 Actions")
+        entity_type = _entity_type_from_task_meta(task_meta)
+        top_n = st.slider("Top records to use", 3, max(3, min(25, total if total else 3)), min(10, max(3, total if total else 3)), key="actions_top_n")
+        action_records = _safe_top_records(records, top_n=top_n)
+
+        if not action_records:
+            st.info("No records available for actions.")
+        else:
+            if entity_type == "paper":
+                action_tab1, action_tab2, action_tab3 = st.tabs(["Summaries", "Compare", "Authors"])
+                with action_tab1:
+                    summaries = summarize_records(action_records, entity_type="paper", llm=llm_client if backends else None, max_sentences=2)
+                    summary_df = pd.DataFrame({
+                        "Title": [r.get("company_name", "") for r in action_records],
+                        "Summary": summaries,
+                    })
+                    st.dataframe(summary_df, use_container_width=True, height=min(500, 80 + len(summary_df) * 40))
+                with action_tab2:
+                    cmp_fields = ["company_name", "authors", "publication_year", "doi", "website", "confidence_score"]
+                    cmp_df = build_comparison_table(action_records, fields=cmp_fields)
+                    st.dataframe(cmp_df, use_container_width=True, height=min(500, 80 + len(cmp_df) * 40))
+                with action_tab3:
+                    authors_rows = extract_authors_from_records(action_records)
+                    authors_df = pd.DataFrame([{
+                        "Title": x.get("title", ""),
+                        "Authors": ", ".join(x.get("authors", []) or []),
+                    } for x in authors_rows])
+                    st.dataframe(authors_df, use_container_width=True, height=min(500, 80 + len(authors_df) * 40))
+
+            elif entity_type == "person":
+                action_tab1, action_tab2, action_tab3 = st.tabs(["Summaries", "Compare", "Contacts / Profiles"])
+                with action_tab1:
+                    summaries = summarize_records(action_records, entity_type="person", llm=llm_client if backends else None, max_sentences=2)
+                    summary_df = pd.DataFrame({
+                        "Name": [r.get("company_name", "") for r in action_records],
+                        "Summary": summaries,
+                    })
+                    st.dataframe(summary_df, use_container_width=True, height=min(500, 80 + len(summary_df) * 40))
+                with action_tab2:
+                    cmp_fields = ["company_name", "job_title", "employer_name", "city", "linkedin_url", "confidence_score"]
+                    cmp_df = build_comparison_table(action_records, fields=cmp_fields)
+                    st.dataframe(cmp_df, use_container_width=True, height=min(500, 80 + len(cmp_df) * 40))
+                with action_tab3:
+                    contacts_df = pd.DataFrame(extract_contacts_from_records(action_records))
+                    st.dataframe(contacts_df, use_container_width=True, height=min(500, 80 + len(contacts_df) * 40))
+
+            else:
+                action_tab1, action_tab2, action_tab3, action_tab4, action_tab5, action_tab6 = st.tabs(["Summaries", "Compare", "Clusters", "Contacts", "Locations", "Outreach"])
+                with action_tab1:
+                    summaries = summarize_records(action_records, entity_type="company", llm=llm_client if backends else None, max_sentences=2)
+                    summary_df = pd.DataFrame({
+                        "Company": [r.get("company_name", "") for r in action_records],
+                        "Summary": summaries,
+                    })
+                    st.dataframe(summary_df, use_container_width=True, height=min(500, 80 + len(summary_df) * 40))
+                with action_tab2:
+                    available_fields = [
+                        "company_name", "website", "hq_country", "presence_countries", "email", "phone",
+                        "linkedin_url", "description", "source_provider", "confidence_score",
+                    ]
+                    compare_fields = st.multiselect(
+                        "Fields to compare",
+                        options=available_fields,
+                        default=["company_name", "website", "hq_country", "email", "phone", "confidence_score"],
+                        key="compare_fields_ms",
+                    )
+                    cmp_df = build_comparison_table(action_records, fields=compare_fields or available_fields[:6])
+                    st.dataframe(cmp_df, use_container_width=True, height=min(500, 80 + len(cmp_df) * 40))
+                with action_tab3:
+                    cluster_field = st.selectbox(
+                        "Cluster by field",
+                        options=["hq_country", "source_provider", "page_type", "presence_countries"],
+                        index=0,
+                        key="cluster_field_sb",
+                    )
+                    cluster_map = cluster_records_by_field(action_records, field=cluster_field)
+                    st.dataframe(_cluster_count_rows(cluster_map), use_container_width=True, height=280)
+                    action_keywords = list(task_meta.get("domain_keywords") or []) + list(task_meta.get("solution_keywords") or [])
+                    action_keywords = [str(x).strip() for x in action_keywords if str(x).strip()]
+                    if action_keywords:
+                        kw_cluster = cluster_records_by_keyword(action_records, action_keywords[:8])
+                        st.markdown("**Keyword clusters**")
+                        st.dataframe(_cluster_count_rows(kw_cluster), use_container_width=True, height=280)
+                with action_tab4:
+                    contacts_df = pd.DataFrame(extract_contacts_from_records(action_records))
+                    if contacts_df.empty:
+                        st.info("No contact signals extracted yet.")
+                    else:
+                        st.dataframe(contacts_df, use_container_width=True, height=min(500, 80 + len(contacts_df) * 40))
+                with action_tab5:
+                    loc_df = pd.DataFrame(extract_locations_from_records(action_records))
+                    geo_summary = summarize_geo_footprint(action_records)
+                    if geo_summary:
+                        st.markdown("**HQ footprint**")
+                        geo_df = pd.DataFrame([{"HQ Country": k, "Count": v} for k, v in geo_summary.items()]).sort_values("Count", ascending=False)
+                        st.dataframe(geo_df, use_container_width=True, height=min(280, 80 + len(geo_df) * 35))
+                    st.markdown("**Location details**")
+                    st.dataframe(loc_df, use_container_width=True, height=min(500, 80 + len(loc_df) * 40))
+                with action_tab6:
+                    target_market_default = ", ".join(task_meta.get("include_countries") or [])
+                    target_market = st.text_input("Target market", value=target_market_default, key="outreach_market_input")
+                    outreach_reason = st.text_area(
+                        "Outreach angle",
+                        value="Potential fit based on geography, niche relevance, and contactability.",
+                        key="outreach_reason_ta",
+                    )
+                    briefs = [build_outreach_brief(r, target_market=target_market, reason=outreach_reason) for r in action_records[:5]]
+                    for i, brief in enumerate(briefs, 1):
+                        with st.expander(f"Brief {i}", expanded=(i == 1)):
+                            st.code(brief, language="text")
+
     elif selected_section == "download":
         st.markdown("### ⬇️ Download your results")
         st.caption("Downloads are generated from the cleaned table shown in the app.")
@@ -1395,6 +1552,37 @@ if result and task_meta:
                 st.code(task_meta["raw_prompt"], language="text")
             if app_removed:
                 st.markdown(f"- **App-side refinement removed:** {app_removed} obvious non-company / non-vendor records")
+
+        with st.expander("Query planning / provider strategy"):
+            if provider_selection.get("ordered"):
+                for item in provider_selection.get("ordered", []):
+                    st.markdown(f"- **{item.get('provider','')}** — priority {item.get('priority','')} · {item.get('reason','')}")
+            if discovery_meta.get("metadata", {}).get("final_counts"):
+                counts = discovery_meta.get("metadata", {}).get("final_counts", {})
+                st.markdown("- **Final planned queries:** " + ", ".join(f"{k}:{v}" for k, v in counts.items()))
+            if discovery_meta.get("issues"):
+                for item in discovery_meta.get("issues", []):
+                    st.markdown(f"- [{item.get('severity','info')}] **{item.get('code','issue')}** — {item.get('message','')}")
+
+        with st.expander("Verification / quality checks"):
+            st.markdown(f"- **Accepted after verification:** {verification.get('accepted_count', 0)}")
+            st.markdown(f"- **Rejected after verification:** {verification.get('rejected_count', 0)}")
+            if critic_issues:
+                for item in critic_issues[:8]:
+                    st.markdown(f"- [{item.get('severity','info')}] **{item.get('code','issue')}** — {item.get('message','')}" + (f"  \n  ↳ {item.get('recommendation','')}" if item.get('recommendation') else ""))
+
+        with st.expander("Gap analysis"):
+            if gap_report:
+                st.markdown(f"- **Results analyzed:** {gap_report.get('total_results', 0)}")
+                if gap_report.get('by_hq_country'):
+                    st.markdown("- **HQ countries:** " + ", ".join(f"{k}:{v}" for k, v in list(gap_report.get('by_hq_country', {}).items())[:8]))
+                if gap_report.get('by_source_provider'):
+                    st.markdown("- **Source providers:** " + ", ".join(f"{k}:{v}" for k, v in list(gap_report.get('by_source_provider', {}).items())[:8]))
+                if gap_report.get('recommendations'):
+                    for rec in gap_report.get('recommendations', []):
+                        st.markdown(f"- {rec}")
+                else:
+                    st.caption("No major gap recommendations.")
 
         with st.expander("Providers used"):
             provider_used = []
