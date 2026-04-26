@@ -402,6 +402,59 @@ REGION_ALIASES: Dict[str, List[str]] = {
     "balkans": ["serbia", "croatia", "bulgaria", "romania", "greece", "slovenia"],
 }
 
+
+
+# Hotfix aliases for Arabic geography resolution
+for _canonical, _aliases in {
+    "egypt": ["مصر", "جمهوريه مصر العربيه", "جمهورية مصر العربية"],
+    "saudi arabia": ["السعوديه", "السعودية", "المملكه العربيه السعوديه", "المملكة العربية السعودية"],
+    "united arab emirates": ["الامارات", "الإمارات", "دوله الامارات العربيه المتحده", "دولة الإمارات العربية المتحدة"],
+    "qatar": ["قطر"],
+    "oman": ["عمان", "سلطنه عمان", "سلطنة عمان"],
+    "kuwait": ["الكويت"],
+    "bahrain": ["البحرين"],
+    "germany": ["المانيا", "ألمانيا"],
+    "norway": ["النرويج"],
+    "united kingdom": ["بريطانيا", "المملكه المتحده", "المملكة المتحدة", "انجلترا", "إنجلترا"],
+    "united states": ["امريكا", "أمريكا", "الولايات المتحده", "الولايات المتحدة", "الولايات المتحدة الامريكية", "الولايات المتحدة الأمريكية"],
+}.items():
+    bucket = COUNTRY_ALIASES.setdefault(_canonical, [])
+    for _alias in _aliases:
+        if _alias not in bucket:
+            bucket.append(_alias)
+
+for _region, _aliases in {
+    "gcc": ["الخليج", "دول الخليج", "مجلس التعاون الخليجي"],
+    "mena": ["الشرق الاوسط وشمال افريقيا", "الشرق الأوسط وشمال أفريقيا"],
+    "middle east": ["الشرق الاوسط", "الشرق الأوسط"],
+    "north africa": ["شمال افريقيا", "شمال أفريقيا"],
+}.items():
+    bucket = REGION_ALIASES.setdefault(_region, [])
+    for _alias in _aliases:
+        if _alias not in bucket:
+            bucket.append(_alias)
+
+CITY_TO_COUNTRY.update({
+    "القاهره": "egypt",
+    "القاهرة": "egypt",
+    "الاسكندريه": "egypt",
+    "الاسكندرية": "egypt",
+    "الإسكندرية": "egypt",
+    "السويس": "egypt",
+    "دبي": "united arab emirates",
+    "ابو ظبي": "united arab emirates",
+    "أبو ظبي": "united arab emirates",
+    "الرياض": "saudi arabia",
+    "الدمام": "saudi arabia",
+    "الدوحه": "qatar",
+    "الدوحة": "qatar",
+    "مسقط": "oman",
+    "مدينه الكويت": "kuwait",
+    "مدينة الكويت": "kuwait",
+    "المنامه": "bahrain",
+    "المنامة": "bahrain",
+})
+
 # Combined sub-national lookup: state/province/territory → country
 _SUBNATIONAL: Dict[str, str] = {}
 _SUBNATIONAL.update(US_STATES)
