@@ -326,6 +326,20 @@ def _humanize_target_category(category: str) -> str:
     }.get((category or "").strip(), (category or "general").replace("_", " ").title())
 
 
+def _display_category(task_meta: dict) -> str:
+    task_type = (task_meta.get("task_type") or "").strip()
+    entity_types = task_meta.get("target_entity_types") or []
+    entity_type = entity_types[0] if entity_types else "company"
+    if task_type == "document_research" or entity_type == "paper":
+        return "Research / academic sources"
+    if task_type == "people_search" or entity_type == "person":
+        return "People / LinkedIn profiles"
+    if entity_type == "tender":
+        return "Tenders / procurement"
+    if entity_type == "product":
+        return "Products / platforms"
+    return _humanize_target_category(task_meta.get("target_category", "general"))
+
 def _humanize_commercial_intent(value: str) -> str:
     return {
         "general": "General",
@@ -367,6 +381,13 @@ _DIGITAL_CATEGORY_HINTS = (
     "digital", "software", "saas", "platform", "analytics", "automation",
     "ai", "artificial intelligence", "machine learning", "data", "iot",
     "scada", "cloud", "tech company", "technology company", "technology vendor",
+)
+
+
+_SERVICE_CATEGORY_HINTS = (
+    "service", "services", "service company", "service companies", "oilfield service", "petroleum service",
+    "wireline", "slickline", "well logging", "well intervention", "drilling services",
+    "شركات خدمات البترول", "خدمات البترول", "خدمات النفط"
 )
 
 
@@ -455,7 +476,7 @@ _DOMAIN_KEYWORD_PATTERNS = {
 }
 
 _GEO_EVIDENCE_HINTS = {
-    "egypt": [r"\begypt\b", r"\begyptian\b", r"\bcairo\b", r"\balexandria\b", r"\bsuez\b", r"\bport said\b", r"\b6th of october\b", r"\bnew cairo\b", r"\+20\b", r"\.eg\b"],
+    "egypt": [r"\begypt\b", r"\begyptian\b", r"مصر", r"القاهرة", r"الاسكندرية", r"\bcairo\b", r"\balexandria\b", r"\bsuez\b", r"\bport said\b", r"\b6th of october\b", r"\bnew cairo\b", r"\+20\b", r"\.eg\b"],
     "united arab emirates": [r"\buae\b", r"\bunited arab emirates\b", r"\bdubai\b", r"\babudhabi\b", r"\babu dhabi\b", r"\bsharjah\b", r"\.ae\b"],
     "united kingdom": [r"\buk\b", r"\bu\.k\.\b", r"\bunited kingdom\b", r"\bengland\b", r"\bscotland\b", r"\bwales\b", r"\blondon\b", r"\.uk\b"],
     "united states": [r"\busa\b", r"\bu\.s\.a\.\b", r"\bunited states\b", r"\bhouston\b", r"\.us\b"],
@@ -508,7 +529,9 @@ def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
     if getattr(task_spec, "task_type", "") in {
         "entity_discovery", "market_research", "similar_entity_expansion", "entity_enrichment"
     }:
-        if any(hint in prompt_lower for hint in _DIGITAL_CATEGORY_HINTS):
+        if any(hint in prompt_lower for hint in _SERVICE_CATEGORY_HINTS):
+            task_spec.target_category = "service_company"
+        elif any(hint in prompt_lower for hint in _DIGITAL_CATEGORY_HINTS):
             task_spec.target_category = "software_company"
 
     if not list(getattr(task_spec, "solution_keywords", []) or []):
@@ -535,8 +558,16 @@ def _postprocess_task_spec_from_prompt(task_spec, prompt: str):
 
     industry = _clean_text(getattr(task_spec, "industry", ""))
     domain_keywords = list(getattr(task_spec, "domain_keywords", []) or [])
-    if domain_keywords and (not industry or industry.lower() in {"oil and gas", "oil & gas", "energy", "petroleum"}):
+    if re.search(r"(شركات خدمات البترول|خدمات البترول|خدمات النفط|oilfield service|petroleum service)", prompt_lower):
+        task_spec.target_category = "service_company"
+        task_spec.industry = "oil and gas"
+    elif domain_keywords and (not industry or industry.lower() in {"oil and gas", "oil & gas", "energy", "petroleum"}):
         task_spec.industry = f"{', '.join(domain_keywords[:4])} in oil and gas"
+
+    if re.search(r"(egyps|exhibitor|exhibitors)", prompt_lower):
+        task_spec.task_type = "market_research"
+        if not getattr(task_spec.geography, 'include_countries', None):
+            task_spec.geography.include_countries = ["egypt"]
 
     return task_spec
 
@@ -646,6 +677,9 @@ def _is_valid_company_record(record: dict, task_meta: dict) -> bool:
     website = _clean_text(record.get("website") or record.get("url"))
     text = _record_text(record)
     target_category = (task_meta.get("target_category") or "general").strip()
+    industry = _normalize_prompt_text(task_meta.get("industry") or "")
+    domain_keywords = [_normalize_prompt_text(x) for x in (task_meta.get("domain_keywords") or [])]
+    task_type = _normalize_prompt_text(task_meta.get("task_type") or "")
 
     if not name and not website:
         return False
@@ -670,12 +704,20 @@ def _is_valid_company_record(record: dict, task_meta: dict) -> bool:
         companyish_ok = bool(website) or any(h in text for h in _COMPANYISH_HINTS)
         if not (digital_ok and companyish_ok):
             return False
+        if industry == "food manufacturing" and not any(h in text for h in ["food", "food processing", "food manufacturing", "beverage"]):
+            return False
 
     if target_category == "service_company":
         serviceish_ok = any(h in text for h in _SERVICE_RESULT_HINTS)
         companyish_ok = bool(website) or any(h in text for h in _COMPANYISH_HINTS)
         if not (serviceish_ok and companyish_ok):
             return False
+        if any(k in domain_keywords for k in ["wireline", "slickline", "well logging"]):
+            if not any(h in text for h in ["wireline", "slickline", "well logging", "open hole", "cased hole", "perforation"]):
+                return False
+        if task_type == "market_research" and "egypt" in [_normalize_prompt_text(c) for c in (task_meta.get("include_countries") or [])]:
+            if "egyps" in _normalize_prompt_text(task_meta.get("raw_prompt") or "") and not any(h in text for h in ["egyps", "exhibitor", "exhibit", "conference", "event"]):
+                return False
 
     include_countries = list(task_meta.get("include_countries") or [])
     exclude_countries = list(task_meta.get("exclude_countries") or [])
@@ -1055,7 +1097,7 @@ if run_btn and prompt.strip():
     with st.container():
         c1, c2, c3, c4 = st.columns(4)
         c1.info(f"**Looking for:** {_humanize_task_type(task_spec.task_type)}")
-        c2.info(f"**Category:** {_humanize_target_category(getattr(task_spec, 'target_category', 'general'))}")
+        c2.info(f"**Category:** {_display_category(task_spec.to_dict() if hasattr(task_spec, "to_dict") else {"target_category": getattr(task_spec, "target_category", "general"), "task_type": getattr(task_spec, "task_type", ""), "target_entity_types": getattr(task_spec, "target_entity_types", [])})}")
         c3.info(f"**Industry:** {task_spec.industry}")
         c4.info(f"**Target:** {max_results} results in {mode} mode")
 
@@ -1186,8 +1228,6 @@ if result and task_meta:
     top_critic = [x for x in critic_issues if str(x.get("severity", "")).lower() in {"warning", "error"}]
     if top_critic:
         st.warning(" · ".join(f"{x.get('code', 'issue')}: {x.get('message', '')}" for x in top_critic[:2]))
-    if gap_report.get("recommendations"):
-        st.info("Gap analysis: " + " | ".join(gap_report.get("recommendations", [])[:2]))
 
     if (not is_people and not is_papers) and total == 0 and len(all_records) > 0:
         if task_meta.get("include_countries") or task_meta.get("exclude_presence_countries") or task_meta.get("exclude_countries"):
@@ -1378,7 +1418,12 @@ if result and task_meta:
     elif selected_section == "actions":
         st.markdown("### 🧰 Actions")
         entity_type = _entity_type_from_task_meta(task_meta)
-        top_n = st.slider("Top records to use", 3, max(3, min(25, total if total else 3)), min(10, max(3, total if total else 3)), key="actions_top_n")
+        max_action_n = max(1, min(25, int(total) if total else len(records)))
+        if max_action_n <= 1:
+            top_n = 1
+            st.caption("Using the top available record.")
+        else:
+            top_n = st.slider("Top records to use", 1, max_action_n, min(10, max_action_n), key="actions_top_n")
         action_records = _safe_top_records(records, top_n=top_n)
 
         if not action_records:
@@ -1532,7 +1577,7 @@ if result and task_meta:
 
         with st.expander("What the agent understood from your prompt", expanded=True):
             st.markdown(f"- **Task type:** {_humanize_task_type(task_meta.get('task_type', ''))}")
-            st.markdown(f"- **Category:** {_humanize_target_category(task_meta.get('target_category', 'general'))}")
+            st.markdown(f"- **Category:** {_display_category(task_meta)}")
             st.markdown(f"- **Topic / industry:** {task_meta.get('industry', '')}")
             if task_meta.get("solution_keywords"):
                 st.markdown(f"- **Solution keywords:** {', '.join(task_meta['solution_keywords'])}")
