@@ -26,7 +26,7 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
-.block-container { padding-top: 1.6rem; padding-bottom: 2rem; max-width: 1180px; }
+.block-container { padding-top: 2.6rem; padding-bottom: 2rem; max-width: 1180px; }
 .hero-title { font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc; margin-bottom: 0.2rem; line-height: 1.08; }
 .hero-subtitle { color: #b3bfd4; font-size: 1.04rem; margin-bottom: 0.95rem; line-height: 1.5; }
 .search-shell {
@@ -297,10 +297,10 @@ with st.sidebar:
         ["Fast", "Balanced", "Deep"],
         index=1,
         horizontal=True,
-        help="Fast is quickest, Balanced is recommended, and Deep is best for more difficult or niche searches.",
+        help="Choose Fast, Balanced, or Deep.",
     )
-    st.caption(f"Target results: {mode_defaults[mode]}")
-    max_results = mode_defaults[mode]
+    target_results = st.slider("Search coverage", 5, 100, mode_defaults[mode], 5, help="Increase this if you want a wider search.")
+    max_results = int(target_results)
 
     with st.expander("Optional integrations", expanded=False):
         st.markdown("**Optional keys for stronger search quality**")
@@ -350,7 +350,7 @@ Create an account → open your dashboard → copy the API key → paste it here
         use_seed_dedupe = st.checkbox("Use uploaded file for deduplication", value=True)
 
 st.markdown('<div class="hero-title">Research Navigator</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, exhibitors, and products in English or Arabic.</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, and exhibitors in English or Arabic.</div>', unsafe_allow_html=True)
 
 st.markdown("""
 <div class="info-strip">
@@ -374,7 +374,6 @@ prompt = st.text_area(
     ),
 )
 _inject_spellcheck()
-st.caption("Browser spellcheck is enabled while you type.")
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
