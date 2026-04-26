@@ -29,7 +29,7 @@ COUNTRY_ALIASES: Dict[str, List[str]] = {
     # Americas
     "usa": [
         "usa", "us", "u.s.", "u.s.a.", "united states", "united states of america",
-        "america", "the us", "the usa", "the united states",
+        "america", "the us", "the usa", "the united states", "أمريكا", "الولايات المتحدة",
     ],
     "canada": ["canada", "ca"],
     "mexico": ["mexico", "méxico"],
@@ -46,7 +46,7 @@ COUNTRY_ALIASES: Dict[str, List[str]] = {
     # Europe
     "united kingdom": [
         "uk", "u.k.", "united kingdom", "britain", "great britain",
-        "england", "scotland", "wales", "northern ireland",
+        "england", "scotland", "wales", "northern ireland", "بريطانيا", "المملكة المتحدة",
     ],
     "ireland": ["ireland", "eire"],
     "france": ["france"],
@@ -84,12 +84,12 @@ COUNTRY_ALIASES: Dict[str, List[str]] = {
     "saudi arabia": ["saudi arabia", "ksa", "kingdom of saudi arabia", "السعودية", "المملكة العربية السعودية"],
     "united arab emirates": [
         "uae", "u.a.e", "u.a.e.", "united arab emirates", "emirates",
-        "the uae", "الإمارات", "الامارات", "دولة الإمارات",
+        "the uae", "الإمارات", "الامارات", "الإمارات العربية المتحدة",
     ],
-    "qatar": ["qatar"],
-    "oman": ["oman", "sultanate of oman"],
-    "kuwait": ["kuwait"],
-    "bahrain": ["bahrain"],
+    "qatar": ["qatar", "قطر"],
+    "oman": ["oman", "sultanate of oman", "عمان"],
+    "kuwait": ["kuwait", "الكويت"],
+    "bahrain": ["bahrain", "البحرين"],
     "iraq": ["iraq"],
     "iran": ["iran"],
     "jordan": ["jordan"],
@@ -236,7 +236,7 @@ CITY_TO_COUNTRY: Dict[str, str] = {
     "montreal": "canada", "ottawa": "canada", "edmonton": "canada",
     "winnipeg": "canada", "quebec city": "canada", "halifax": "canada",
     # Egypt
-    "cairo": "egypt", "القاهرة": "egypt", "alexandria": "egypt", "الإسكندرية": "egypt", "الاسكندرية": "egypt", "giza": "egypt", "الجيزة": "egypt",
+    "cairo": "egypt", "alexandria": "egypt", "giza": "egypt",
     "port said": "egypt", "suez": "egypt", "luxor": "egypt",
     "aswan": "egypt", "hurghada": "egypt",
     # Saudi Arabia
@@ -330,8 +330,21 @@ CITY_TO_COUNTRY: Dict[str, str] = {
     "amman": "jordan", "beirut": "lebanon",
 }
 
+
+
+ARABIC_REGION_ALIASES: Dict[str, str] = {
+    "الخليج": "gcc",
+    "دول الخليج": "gcc",
+    "اوروبا": "europe",
+    "أوروبا": "europe",
+    "الشرق الاوسط": "middle east",
+    "الشرق الأوسط": "middle east",
+    "شمال افريقيا": "north africa",
+    "شمال أفريقيا": "north africa",
+}
+
 REGION_ALIASES: Dict[str, List[str]] = {
-    "europe": ["أوروبا", "اوروبا", 
+    "europe": [
         "united kingdom", "france", "germany", "italy", "spain", "portugal",
         "netherlands", "belgium", "switzerland", "austria", "norway",
         "sweden", "denmark", "finland", "poland", "czech republic",
@@ -339,17 +352,17 @@ REGION_ALIASES: Dict[str, List[str]] = {
         "serbia", "croatia", "bulgaria", "slovakia", "slovenia",
         "estonia", "latvia", "lithuania", "luxembourg", "iceland",
     ],
-    "middle east": ["الشرق الأوسط", 
+    "middle east": [
         "saudi arabia", "united arab emirates", "qatar", "oman", "kuwait",
         "bahrain", "iraq", "jordan", "lebanon", "israel", "iran", "yemen", "syria",
     ],
-    "north africa": ["شمال أفريقيا", "شمال افريقيا", "egypt", "libya", "algeria", "tunisia", "morocco"],
+    "north africa": ["egypt", "libya", "algeria", "tunisia", "morocco"],
     "mena": [
         "egypt", "libya", "algeria", "tunisia", "morocco",
         "saudi arabia", "united arab emirates", "qatar", "oman", "kuwait",
         "bahrain", "iraq", "jordan", "lebanon", "israel", "iran", "yemen",
     ],
-    "gcc": ["الخليج", "دول الخليج", 
+    "gcc": [
         "saudi arabia", "united arab emirates", "qatar", "oman", "kuwait", "bahrain",
     ],
     "asia": [
@@ -397,10 +410,8 @@ _SUBNATIONAL.update(AUSTRALIAN_STATES)
 
 
 def normalize_geo_text(text: str) -> str:
-    text = (text or "").strip().lower()
-    text = re.sub("[\u064B-\u065F\u0670]", "", text)
-    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ة", "ه").replace("ى", "ي")
-    return re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+", " ", (text or "").strip().lower())
+    return ARABIC_REGION_ALIASES.get(text, text)
 
 
 def normalize_country_name(name: str) -> str:

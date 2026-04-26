@@ -53,7 +53,8 @@ class QueryBuilder:
             return self._deduplicate(queries)
 
         focus = (task.industry or "").strip() or "industry"
-        base_entity = "software company" if category == "software_company" else ("service company" if category == "service_company" else "company")
+        entity_type = (task.target_entity_types[0] if getattr(task, "target_entity_types", None) else "company").lower()
+        base_entity = "software company" if category == "software_company" else ("service company" if category == "service_company" else ("tender" if entity_type=="tender" else ("product" if entity_type=="product" else "company")))
         q = f"{focus} {base_entity} {geo}".strip()
         queries.append(SearchQuery(text=q, priority=1, family="core"))
         return self._deduplicate(queries)

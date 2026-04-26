@@ -65,3 +65,10 @@ RERANK_PROMPT = ""
 GEO_VERIFY_PROMPT = ""
 PAGE_CLASSIFY_PROMPT = ""
 CONTACT_EXTRACT_PROMPT = ""
+
+
+# Release additions
+# - NEVER put website/email/phone/deadline/buyer/company-names words into topic
+# - For Arabic petroleum-service prompts like "شركات خدمات البترول في مصر" => topic="oil and gas", entity_category="service_company", include_countries=["egypt"]
+# - For EGYPS exhibitor prompts => task_type="market_research", topic should keep only the technical niche (e.g. wireline well logging), not extraction words
+# - For product/software-platform prompts, keep entity_type="product" when the user explicitly asks for products/platforms

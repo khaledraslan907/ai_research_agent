@@ -139,6 +139,22 @@ DOMAIN_KEYWORD_PATTERNS = {
     "food manufacturing": [r"\bfood manufacturing\b", r"\bfood processing\b"],
 }
 
+ARABIC_GEO_ALIAS_MAP = {
+    "مصر": "egypt",
+    "جمهورية مصر العربية": "egypt",
+    "الخليج": "gcc",
+    "دول الخليج": "gcc",
+    "السعودية": "saudi arabia",
+    "المملكة العربية السعودية": "saudi arabia",
+    "الإمارات": "united arab emirates",
+    "الامارات": "united arab emirates",
+    "الإمارات العربية المتحدة": "united arab emirates",
+    "بريطانيا": "united kingdom",
+    "المملكة المتحدة": "united kingdom",
+    "أمريكا": "united states",
+    "الولايات المتحدة": "united states",
+}
+
 GEO_ALIAS_MAP = {
     "uk": "united kingdom", "u.k.": "united kingdom",
     "uae": "united arab emirates", "u.a.e.": "united arab emirates",
@@ -202,8 +218,16 @@ def _extract_geography(prompt_lower:str)->GeographyRules:
     return GeographyRules(include_countries=_dedupe_keep_order(include), exclude_countries=[], exclude_presence_countries=[], strict_mode=bool(include))
 
 def _extract_entity_types(prompt_lower:str)->List[str]:
+    if re.search(r"\b(tender|tenders|rfq|rfp|itt|itb|procurement|bid|bids)\b", prompt_lower):
+        return ["tender"]
+    if re.search(r"\b(product|products|platform|platforms|tool|tools)\b", prompt_lower):
+        return ["product"]
     if re.search(r"\b(exhibitor|exhibitors|egyps|conference|expo|trade show)\b", prompt_lower):
         return ["company"]
+    if re.search(r"\b(paper|papers|study|studies|publication|publications|article|articles|research|literature)\b", prompt_lower):
+        return ["paper"]
+    if re.search(r"\b(linkedin|profiles?|people|engineers?|managers?|recruiters?|hr)\b", prompt_lower):
+        return ["person"]
     found=[]
     for entity_type, hints in ENTITY_HINTS.items():
         if any(re.search(r"\b"+re.escape(h)+r"\b", prompt_lower) for h in hints):
@@ -215,15 +239,17 @@ def _extract_task_type(prompt_lower:str)->str:
         return "document_research"
     if re.search(r"\b(linkedin|profiles?|people|engineers?|managers?|recruiters?|hr)\b", prompt_lower):
         return "people_search"
+    if re.search(r"\b(tender|tenders|rfq|rfp|itt|itb|procurement|bid|bids)\b", prompt_lower):
+        return "market_research"
     if re.search(r"\b(exhibitor|exhibitors|egyps|conference|expo|trade show)\b", prompt_lower):
         return "market_research"
     return "entity_discovery"
 
 def _extract_target_category(prompt_lower:str)->str:
-    # service/company-event first
-    if re.search(r"\b(exhibitor|exhibitors|wireline|slickline|well logging|oilfield service|service companies?|contractors?)\b", prompt_lower):
+    # service/company-event first, including Arabic petroleum-service wording
+    if re.search(r"(شركات خدمات البترول|خدمات البترول|خدمات النفط|oilfield service|petroleum service|service companies?|contractors?|wireline|slickline|well logging|exhibitor|exhibitors)", prompt_lower):
         return "service_company"
-    if any(h in prompt_lower for h in DIGITAL_CATEGORY_HINTS):
+    if re.search(r"\b(product|products|platform|platforms|software companies?|software vendors?|digital|saas|automation|mes|factory automation)\b", prompt_lower) or any(h in prompt_lower for h in DIGITAL_CATEGORY_HINTS):
         return "software_company"
     return "general"
 
@@ -239,11 +265,19 @@ def _clean_topic_text(text:str)->str:
     return _normalize(text)
 
 def _extract_focus_term(prompt:str, prompt_lower:str, task_type:str)->str:
-    if re.search(r"\bfood manufacturing\b|\bfood processing\b", prompt_lower):
+    if re.search(r"(food manufacturing|food processing)", prompt_lower):
         return "food manufacturing"
-    if re.search(r"\bwireline\b|\bwell logging\b", prompt_lower):
+    if re.search(r"(pipeline inspection)", prompt_lower):
+        return "pipeline inspection"
+    if re.search(r"(multiphase metering)", prompt_lower):
+        return "multiphase metering in oil and gas" if re.search(r"oil and gas|petroleum", prompt_lower) else "multiphase metering"
+    if re.search(r"(wireline|well logging|slickline)", prompt_lower):
         return "wireline well logging"
-    if re.search(r"\boilfield service\b|\bpetroleum service\b|\boil and gas service\b", prompt_lower):
+    if re.search(r"(nanobubbles).*(enhanced oil recovery|eor)|((enhanced oil recovery|eor).*(nanobubbles))", prompt_lower):
+        return "nanobubbles in enhanced oil recovery"
+    if re.search(r"(electrical submersible pump|\besp\b)", prompt_lower):
+        return "electrical submersible pump"
+    if re.search(r"(شركات خدمات البترول|خدمات البترول|خدمات النفط|oilfield service|petroleum service|oil and gas service)", prompt_lower):
         return "oil and gas"
     words = [w for w in re.split(r"[\s,/]+", _clean_topic_text(prompt_lower)) if w and w not in GENERIC_STOPWORDS and w not in _REQUEST_NOISE]
     return " ".join(words[:4]).strip()
@@ -278,11 +312,21 @@ def _extract_commercial_intent(prompt_lower:str)->str:
 
 def _extract_target_attributes(prompt_lower:str)->List[str]:
     found=["website"]
-    for attr, hints in ATTRIBUTE_HINTS.items():
-        if attr != "website" and any(h in prompt_lower for h in hints):
-            found.append(attr)
-    if "email" in prompt_lower:
+    if "email" in prompt_lower or "الإيميل" in prompt_lower or "البريد" in prompt_lower:
         found.append("email")
+    if re.search(r"\b(phone|phones|telephone|contact number|رقم الهاتف|هاتف)\b", prompt_lower):
+        found.append("phone")
+    if re.search(r"\b(linkedin|profile url|profile link)\b", prompt_lower):
+        found.append("linkedin")
+    if re.search(r"\b(doi|authors?|abstract|title)\b", prompt_lower):
+        if "title" in prompt_lower: found.append("title")
+        if re.search(r"\bauthors?\b", prompt_lower): found.append("author")
+        if "doi" in prompt_lower: found.append("doi")
+        if "abstract" in prompt_lower: found.append("summary")
+    if re.search(r"\b(deadline|due date|closing date)\b", prompt_lower):
+        found.append("deadline")
+    if re.search(r"\b(buyer|issuer|procuring entity|tendering authority)\b", prompt_lower):
+        found.append("buyer")
     return _dedupe_keep_order(found)
 
 def _extract_output_format(prompt_lower:str)->str:
