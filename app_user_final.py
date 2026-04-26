@@ -349,20 +349,35 @@ with st.sidebar:
         with st.expander("How to get keys", expanded=False):
             st.markdown(
                 """
-**[Groq](https://console.groq.com/)**  
-Create a free account → open **API Keys** → create a key → paste it here.
+**[Groq — API Keys](https://console.groq.com/keys)**  
+1. Create a free account or sign in.  
+2. Open the **API Keys** page.  
+3. Click **Create API Key**.  
+4. Copy the key and paste it here.
 
-**[Gemini](https://aistudio.google.com/)**  
-Open **Google AI Studio** → create an API key → paste it here.
+**[Gemini — Google AI Studio API Keys](https://aistudio.google.com/app/apikey)**  
+1. Sign in with your Google account.  
+2. Open the **API key** page in Google AI Studio.  
+3. Create a key.  
+4. Copy the key and paste it here.
 
-**[Exa](https://exa.ai/)**  
-Create an account → open your dashboard → generate an API key → paste it here.
+**[Exa — Dashboard API Keys](https://dashboard.exa.ai/api-keys)**  
+1. Create an account or sign in.  
+2. Open your **API Keys** page.  
+3. Click **Create Key**.  
+4. Copy the key and paste it here.
 
-**[Tavily](https://tavily.com/)**  
-Create a free account → open **API Keys** → copy your key → paste it here.
+**[Tavily — Platform / Get an API Key](https://app.tavily.com/home)**  
+1. Create a free account or sign in.  
+2. Open your dashboard.  
+3. Copy one of your API keys.  
+4. Paste it here.
 
-**[SerpApi](https://serpapi.com/)**  
-Create an account → open your dashboard → copy the API key → paste it here.
+**[SerpApi — Sign in / Dashboard](https://serpapi.com/users/sign_in)**  
+1. Create an account or sign in.  
+2. Open your dashboard.  
+3. Copy your API key.  
+4. Paste it here.
                 """
             )
 
