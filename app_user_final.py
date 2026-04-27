@@ -6,7 +6,6 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
@@ -26,9 +25,9 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
-.block-container { padding-top: 2.6rem; padding-bottom: 2rem; max-width: 1180px; }
-.hero-title { font-size: 2.35rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc; margin-bottom: 0.2rem; line-height: 1.08; }
-.hero-subtitle { color: #b3bfd4; font-size: 1.04rem; margin-bottom: 0.95rem; line-height: 1.5; }
+.block-container { padding-top: 3.35rem; padding-bottom: 2rem; max-width: 1180px; }
+.hero-title { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc; margin-bottom: 0.18rem; line-height: 1.1; }
+.hero-subtitle { color: #b3bfd4; font-size: 0.98rem; margin-bottom: 0.95rem; line-height: 1.45; max-width: 860px; }
 .search-shell {
     background: rgba(15, 22, 38, 0.92);
     border: 1px solid rgba(124, 143, 179, 0.18);
@@ -84,9 +83,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     border-radius: 12px; padding: 0.55rem 0.75rem; font-size: 0.88rem; margin-top: 0.6rem;
 }
 .stButton > button { border-radius: 12px; }
-div[data-testid="stTooltipIcon"] svg { width: 0.88rem; height: 0.88rem; }
-div[data-testid="stRadio"] > div { gap: 0.45rem; }
-div[data-testid="stRadio"] label p { font-weight: 600; }
+div[data-testid="stTooltipIcon"] svg { width: 0.82rem; height: 0.82rem; }
+div[data-testid="stRadio"] > div { gap: 0.42rem; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -265,27 +263,6 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
-def _inject_spellcheck():
-    components.html(
-        """
-        <script>
-        const setSpell = () => {
-          const areas = window.parent.document.querySelectorAll('textarea');
-          areas.forEach(a => {
-            a.setAttribute('spellcheck', 'true');
-            a.setAttribute('autocomplete', 'on');
-            a.setAttribute('autocorrect', 'on');
-          });
-        };
-        setSpell();
-        const observer = new MutationObserver(setSpell);
-        observer.observe(window.parent.document.body, { childList: true, subtree: true });
-        </script>
-        """,
-        height=0,
-    )
-
-
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
 
 with st.sidebar:
@@ -297,10 +274,16 @@ with st.sidebar:
         ["Fast", "Balanced", "Deep"],
         index=1,
         horizontal=True,
-        help="Choose Fast, Balanced, or Deep.",
+        help="Fast: quick. Balanced: recommended. Deep: widest.",
     )
-    target_results = st.slider("Search coverage", 5, 100, mode_defaults[mode], 5, help="Increase this if you want a wider search.")
-    max_results = int(target_results)
+    search_coverage = st.slider(
+        "Search coverage",
+        5,
+        100,
+        mode_defaults[mode],
+        5,
+        help="Increase this to widen the search.",
+    )
 
     with st.expander("Optional integrations", expanded=False):
         st.markdown("**Optional keys for stronger search quality**")
@@ -352,12 +335,15 @@ Create an account → open your dashboard → copy the API key → paste it here
 st.markdown('<div class="hero-title">Research Navigator</div>', unsafe_allow_html=True)
 st.markdown('<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, and exhibitors in English or Arabic.</div>', unsafe_allow_html=True)
 
-st.markdown("""
+st.markdown(
+    """
 <div class="info-strip">
   <div class="info-strip-title">Optional integrations can improve search quality</div>
   <div class="info-strip-text">For broader coverage and stronger interpretation, add Groq, Gemini, Exa, Tavily, or SerpApi from the <strong>Optional integrations</strong> section in the sidebar.</div>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 st.markdown('<div class="search-shell">', unsafe_allow_html=True)
 prompt = st.text_area(
@@ -373,7 +359,6 @@ prompt = st.text_area(
         "• ابحث عن شركات خدمات البترول في مصر مع الموقع الإلكتروني والإيميل."
     ),
 )
-_inject_spellcheck()
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -400,7 +385,7 @@ if run_btn:
         task_spec = parse_task_prompt_llm_first(prompt, llm=llm_client)
 
     task_spec.mode = mode
-    task_spec.max_results = int(max_results)
+    task_spec.max_results = int(search_coverage)
     task_spec.output.format = export_format
     task_spec.output.filename = _normalize_filename(export_filename, export_format)
     if not task_spec.target_attributes:
@@ -420,7 +405,7 @@ if run_btn:
     progress = st.empty()
 
     def _progress(msg: str):
-        progress.caption(msg)
+        progress.progress(0, text=msg)
 
     with st.spinner("Searching..."):
         result = SearchOrchestrator().run_task(
@@ -447,7 +432,7 @@ if run_btn:
     top3.metric("Mode", mode)
 
     if records:
-        result_tabs = st.tabs(["Results", "Download", "Search details"])
+        result_tabs = st.tabs(["Results", "Download"])
         with result_tabs[0]:
             entity_type = (task_meta.get("target_entity_types") or ["company"])[0]
             if task_meta.get("task_type") == "document_research" or entity_type == "paper":
@@ -469,17 +454,8 @@ if run_btn:
                 )
             else:
                 st.caption("No downloadable file is available for this run.")
-
-        with result_tabs[2]:
-            with st.expander("Search interpretation", expanded=True):
-                st.json(task_meta)
-            with st.expander("Search logs", expanded=False):
-                logs = result.get("logs", []) or []
-                st.code("\n".join(logs[-120:]) if logs else "No logs")
-            with st.expander("Planned queries", expanded=False):
-                st.json(result.get("queries", {}))
     else:
         st.markdown('<div class="empty-box">', unsafe_allow_html=True)
         st.markdown("### No strong matches found yet")
-        st.markdown("Try switching to **Balanced** mode, broadening the request slightly, or adding optional integrations for wider coverage.")
+        st.markdown("Try switching to **Balanced** mode, broadening the request slightly, or increasing **Search coverage**.")
         st.markdown('</div>', unsafe_allow_html=True)
