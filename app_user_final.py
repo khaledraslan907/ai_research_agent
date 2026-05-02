@@ -37,11 +37,29 @@ st.markdown("""
 
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
-.block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1180px; }
+.block-container { padding-top: 4.8rem; padding-bottom: 2rem; max-width: 1180px; }
 
-/* Keep the sidebar control from visually fighting with the title area */
+/* Prevent Streamlit's floating top toolbar / sidebar toggle from sitting on top of the hero title */
+header[data-testid="stHeader"] {
+    background: rgba(7,11,20,0.98) !important;
+    height: 3.4rem !important;
+    border-bottom: 1px solid rgba(124,143,179,0.08);
+}
+[data-testid="stToolbar"] {
+    right: 0.75rem !important;
+}
+[data-testid="collapsedControl"] {
+    top: 0.85rem !important;
+    left: 0.85rem !important;
+    color: #9cc2ff !important;
+    z-index: 999999 !important;
+}
 button[kind="header"] { color: #9cc2ff !important; }
-[data-testid="collapsedControl"] { color: #9cc2ff !important; }
+
+@media (max-width: 900px) {
+    .block-container { padding-top: 5.2rem; }
+    .hero-title { font-size: 1.75rem; }
+}
 
 /* ── Hero ── */
 .hero-wrap { display: flex; align-items: flex-start; justify-content: space-between;
@@ -520,11 +538,6 @@ for _k, _v in [
         st.session_state[_k] = _v
 
 
-def _on_mode_change() -> None:
-    """Fires on radio change — immediately syncs the slider to the new mode's default."""
-    st.session_state.coverage_slider = _MODE_DEFAULTS[st.session_state.search_mode]
-
-
 def _set_prompt(text: str) -> None:
     st.session_state["prompt_value"] = text
 
@@ -536,30 +549,42 @@ def _set_prompt(text: str) -> None:
 with st.sidebar:
     st.markdown("## ⚙️ Search settings")
 
-    # ── Mode (single-click fix) ───────────────────────────────────────────────
-    st.radio(
-        "Search mode",
-        ["Fast", "Balanced", "Deep"],
-        key="search_mode",
-        horizontal=True,
-        on_change=_on_mode_change,
-        help=(
-            "**Fast** — quickest, fewer sources.  "
-            "**Balanced** — recommended for most searches.  "
-            "**Deep** — best for niche or difficult topics."
-        ),
-    )
-    mode = st.session_state.search_mode
+    # ── Mode settings inside a form ───────────────────────────────────────────
+    # Streamlit normally reruns the whole app every time a radio/slider changes.
+    # A form prevents that slow reload until the user clicks Apply settings.
+    with st.form("search_settings_form", border=False):
+        pending_mode = st.radio(
+            "Search mode",
+            ["Fast", "Balanced", "Deep"],
+            index=["Fast", "Balanced", "Deep"].index(st.session_state.search_mode),
+            horizontal=True,
+            help=(
+                "**Fast** — quickest, fewer sources.  "
+                "**Balanced** — recommended for most searches.  "
+                "**Deep** — best for niche or difficult topics."
+            ),
+        )
 
-    st.slider(
-        "Search coverage",
-        min_value=5,
-        max_value=80,
-        step=5,
-        key="coverage_slider",
-        help="How many candidate results to scan before filtering. Higher = wider net, slower search.",
-    )
-    search_coverage = st.session_state.coverage_slider
+        pending_coverage = st.slider(
+            "Search coverage",
+            min_value=5,
+            max_value=80,
+            value=int(st.session_state.coverage_slider),
+            step=5,
+            help="How many candidate results to scan before filtering. Higher = wider net, slower search.",
+        )
+
+        st.caption("Suggested coverage: Fast 15 · Balanced 25 · Deep 40")
+        apply_settings = st.form_submit_button("Apply settings", use_container_width=True)
+
+    if apply_settings:
+        st.session_state.search_mode = pending_mode
+        st.session_state.coverage_slider = int(pending_coverage)
+        st.toast(f"Applied: {pending_mode} mode, coverage {pending_coverage}")
+
+    mode = st.session_state.search_mode
+    search_coverage = int(st.session_state.coverage_slider)
+    st.caption(f"Active: **{mode}** mode · coverage **{search_coverage}**")
 
     st.divider()
 
