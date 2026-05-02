@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
@@ -36,9 +38,9 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
-.block-container { padding-top: 1.75rem; padding-bottom: 2rem; max-width: 1180px; }
-.hero-title { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.03em; color: #f8fafc; margin-bottom: 0.2rem; }
-.hero-subtitle { color: #b3bfd4; font-size: 1.02rem; margin-bottom: 0.9rem; line-height: 1.45; }
+.block-container { padding-top: 1.9rem; padding-bottom: 2rem; max-width: 1220px; }
+.hero-title { font-size: 2.18rem; font-weight: 800; letter-spacing: -0.03em; color: #f8fafc; margin-bottom: 0.18rem; }
+.hero-subtitle { color: #b3bfd4; font-size: 1rem; margin-bottom: 0.95rem; line-height: 1.45; }
 .search-shell {
     background: rgba(15, 22, 38, 0.92);
     border: 1px solid rgba(124, 143, 179, 0.18);
@@ -63,11 +65,20 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     padding: 1rem 1.1rem;
     margin-bottom: 1rem;
 }
-.metric-chip {
-    display: inline-block; padding: 0.28rem 0.62rem; border-radius: 999px;
-    background: rgba(83, 113, 255, 0.14); border: 1px solid rgba(83, 113, 255, 0.22);
-    color: #dbe6ff; font-size: 0.82rem; margin: 0 0.45rem 0.45rem 0;
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.7rem;
+    margin-top: 0.8rem;
 }
+.summary-item {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(124, 143, 179, 0.14);
+    border-radius: 12px;
+    padding: 0.72rem 0.82rem;
+}
+.summary-label { color: #8ea0bc; font-size: 0.78rem; margin-bottom: 0.16rem; }
+.summary-value { color: #f3f7ff; font-size: 0.92rem; line-height: 1.4; }
 .key-status {
     color: #d7eadc; background: rgba(41, 89, 63, 0.22); border: 1px solid rgba(91, 166, 116, 0.18);
     border-radius: 12px; padding: 0.55rem 0.75rem; font-size: 0.88rem; margin-top: 0.6rem;
@@ -84,7 +95,56 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     padding: 1rem;
     margin-top: 1rem;
 }
+.results-shell {
+    background: rgba(15, 22, 38, 0.9);
+    border: 1px solid rgba(124, 143, 179, 0.16);
+    border-radius: 16px;
+    padding: 0.45rem 0.45rem 0.2rem 0.45rem;
+}
+.results-table-wrap {
+    overflow-x: auto;
+}
+.results-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+.results-table th {
+    text-align: left;
+    color: #a9b7cd;
+    font-weight: 600;
+    padding: 0.8rem 0.75rem;
+    border-bottom: 1px solid rgba(124, 143, 179, 0.14);
+    position: sticky;
+    top: 0;
+    background: rgba(15, 22, 38, 0.98);
+    white-space: nowrap;
+}
+.results-table td {
+    padding: 0.78rem 0.75rem;
+    border-bottom: 1px solid rgba(124, 143, 179, 0.1);
+    vertical-align: top;
+    color: #e7ecf5;
+}
+.results-table tr:hover td { background: rgba(255,255,255,0.02); }
+.results-link {
+    color: #7fb0ff;
+    text-decoration: none;
+    word-break: break-word;
+}
+.results-link:hover { text-decoration: underline; }
+.results-summary {
+    max-width: 440px;
+    line-height: 1.45;
+    color: #d4deee;
+}
+.mode-btn-row { gap: 0.55rem; }
 .stButton > button, .stDownloadButton > button { border-radius: 12px; }
+.small-muted { color: #99a7bc; font-size: 0.84rem; }
+@media (max-width: 900px) {
+    .summary-grid { grid-template-columns: 1fr; }
+    .hero-title { font-size: 1.9rem; }
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -133,6 +193,37 @@ def _human_category(cat: str) -> str:
     }.get((cat or "general").strip(), (cat or "general").replace("_", " ").title())
 
 
+def _human_attr(attr: str) -> str:
+    mapping = {
+        "website": "Website",
+        "email": "Email",
+        "phone": "Phone",
+        "linkedin": "LinkedIn",
+        "linkedin_url": "LinkedIn",
+        "summary": "Summary",
+        "hq_country": "HQ country",
+        "presence_countries": "Countries served",
+        "author": "Authors",
+        "authors": "Authors",
+        "doi": "DOI",
+    }
+    return mapping.get(str(attr).strip(), str(attr).replace("_", " ").capitalize())
+
+
+def _fit_label(score: Any) -> str:
+    try:
+        s = float(score)
+    except Exception:
+        return "Review"
+    if s >= 75:
+        return "Strong match"
+    if s >= 50:
+        return "Good match"
+    if s >= 30:
+        return "Possible match"
+    return "Review"
+
+
 def _read_file(file) -> pd.DataFrame | None:
     if file is None:
         return None
@@ -149,36 +240,99 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
-def _render_search_summary(task_spec: dict):
-    geo = task_spec.get("geography", {}) or {}
-    inc = [str(x).title() for x in (geo.get("include_countries") or []) if str(x).strip()]
-    exc = [str(x).title() for x in (geo.get("exclude_countries") or []) if str(x).strip()]
-    excp = [str(x).title() for x in (geo.get("exclude_presence_countries") or []) if str(x).strip()]
-
-    st.markdown('<div class="summary-card">', unsafe_allow_html=True)
-    st.markdown("### Search summary")
-    st.markdown(f'<span class="metric-chip">Type: {_human_task(task_spec.get("task_type", ""))}</span>', unsafe_allow_html=True)
-    st.markdown(f'<span class="metric-chip">Category: {_human_category(task_spec.get("target_category", ""))}</span>', unsafe_allow_html=True)
-    if _clean(task_spec.get("industry")):
-        st.markdown(f'<span class="metric-chip">Focus: {_clean(task_spec.get("industry"))}</span>', unsafe_allow_html=True)
-    if inc:
-        st.markdown(f'<span class="metric-chip">Region: {", ".join(inc)}</span>', unsafe_allow_html=True)
-    if exc:
-        st.markdown(f'<span class="metric-chip">Exclude HQ: {", ".join(exc)}</span>', unsafe_allow_html=True)
-    if excp:
-        st.markdown(f'<span class="metric-chip">Exclude presence: {", ".join(excp)}</span>', unsafe_allow_html=True)
-    requested = [str(x) for x in (task_spec.get("target_attributes") or []) if str(x).strip()]
-    if requested:
-        st.caption("Requested info: " + ", ".join(requested))
-    st.markdown('</div>', unsafe_allow_html=True)
+def _summary_keywords(task_meta: dict) -> set[str]:
+    raw = []
+    raw.extend(task_meta.get("domain_keywords") or [])
+    raw.extend(task_meta.get("solution_keywords") or [])
+    raw.append(task_meta.get("industry") or "")
+    text = " ".join(str(x) for x in raw if x)
+    parts = re.findall(r"[A-Za-z][A-Za-z\-]{2,}", text.lower())
+    stop = {
+        "with", "from", "into", "that", "this", "have", "more", "than", "your", "their",
+        "company", "companies", "service", "services", "engineering", "general", "results",
+        "focus", "type", "category", "industry", "requested", "info", "search", "research",
+        "oil", "gas", "petroleum", "applications",
+    }
+    return {p for p in parts if p not in stop}
 
 
-def _summary_from_record(r: dict) -> str:
+def _looks_academic_source(url: str) -> bool:
+    u = (url or "").lower()
+    academic_markers = [
+        "doi.org", "onepetro", "sciencedirect", "springer", "researchgate", "ieeexplore",
+        "mdpi", "frontiersin", "wiley", "sagepub", "tandfonline", "osti.gov", "scholar.google",
+        "semanticscholar", "arxiv", "acm.org", "nature.com", "elsevier", "hindawi",
+    ]
+    return any(m in u for m in academic_markers)
+
+
+def _summary_from_record(r: dict, task_meta: dict) -> str:
+    candidates = []
     for key in ["summary", "description", "snippet", "notes"]:
         val = _clean(r.get(key))
         if val:
-            return val
+            candidates.append(val)
+
+    if not candidates:
+        return ""
+
+    task_type = task_meta.get("task_type", "")
+    entity_type = (task_meta.get("target_entity_types") or [""])[0]
+    keywords = _summary_keywords(task_meta)
+    junk_patterns = [
+        "apply today", "job opportunities", "cash on delivery", "shipping services", "courier",
+        "explore", "prime for free", "shop now", "recruitment", "vacancies",
+    ]
+    academic_required = task_type == "document_research" or entity_type == "paper"
+    has_authors = bool(_clean(r.get("authors")))
+    has_year = bool(_clean(r.get("publication_year")))
+    has_doi = bool(_clean(r.get("doi")))
+    url = _clean(r.get("website")) or _clean(r.get("source_url"))
+
+    for text in candidates:
+        low = text.lower()
+        if any(pat in low for pat in junk_patterns):
+            continue
+        if academic_required:
+            if not (has_authors or has_year or has_doi or _looks_academic_source(url)):
+                continue
+        if keywords:
+            if not any(k in low for k in keywords):
+                continue
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        return cleaned[:340]
+
     return ""
+
+
+def _record_is_relevant(r: dict, task_meta: dict) -> bool:
+    name = (_clean(r.get("company_name")) or _clean(r.get("title"))).lower()
+    url = (_clean(r.get("website")) or _clean(r.get("source_url"))).lower()
+    summary = _summary_from_record(r, task_meta).lower()
+    text = " ".join([name, url, summary])
+    task_type = task_meta.get("task_type", "")
+    entity_type = (task_meta.get("target_entity_types") or [""])[0]
+
+    hard_bad = ["amazon", "wuzzuf", "courier", "shipping services", "job opportunities", "vacancies"]
+    if any(b in text for b in hard_bad):
+        return False
+
+    if task_type == "document_research" or entity_type == "paper":
+        if _clean(r.get("authors")) or _clean(r.get("doi")) or _clean(r.get("publication_year")):
+            return True
+        if _looks_academic_source(url):
+            return True
+        return False
+
+    keywords = _summary_keywords(task_meta)
+    if keywords and not any(k in text for k in keywords):
+        return False
+    return True
+
+
+def _filter_records_for_display(records: list[dict], task_meta: dict) -> list[dict]:
+    filtered = [r for r in records if _record_is_relevant(r, task_meta)]
+    return filtered or records
 
 
 def _build_display_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
@@ -192,7 +346,7 @@ def _build_display_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
                 "Link": _clean(r.get("website")) or _clean(r.get("source_url")),
                 "Authors": _clean(r.get("authors")),
                 "Year": _clean(r.get("publication_year")),
-                "Summary": _summary_from_record(r)[:320],
+                "Summary": _summary_from_record(r, task_meta),
             })
         elif task_type == "people_search" or entity_type == "person":
             rows.append({
@@ -201,7 +355,7 @@ def _build_display_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
                 "Employer": _clean(r.get("employer_name")),
                 "Job title": _clean(r.get("job_title")),
                 "Location": _clean(r.get("city")) or _clean(r.get("country")),
-                "Summary": _summary_from_record(r)[:260],
+                "Summary": _summary_from_record(r, task_meta),
             })
         else:
             rows.append({
@@ -210,7 +364,7 @@ def _build_display_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
                 "Email": _clean(r.get("email")),
                 "Phone": _clean(r.get("phone")),
                 "LinkedIn": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")),
-                "Summary": _summary_from_record(r)[:240],
+                "Summary": _summary_from_record(r, task_meta),
             })
     return pd.DataFrame(rows)
 
@@ -230,7 +384,7 @@ def _build_export_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
             "email": _clean(r.get("email")),
             "phone": _clean(r.get("phone")),
             "linkedin": linkedin,
-            "summary": _summary_from_record(r),
+            "summary": _summary_from_record(r, task_meta),
         })
     return pd.DataFrame(rows)
 
@@ -296,34 +450,105 @@ def _to_word_bytes(df: pd.DataFrame, title: str) -> tuple[bytes, str]:
     return "\n".join(lines).encode("utf-8"), ".doc"
 
 
+def _render_results_table(df: pd.DataFrame):
+    headers = list(df.columns)
+    rows_html = []
+    for _, row in df.iterrows():
+        cells = []
+        for col in headers:
+            val = _clean(row.get(col))
+            if col in {"Link", "LinkedIn"} and val:
+                label = val
+                safe_href = val.replace("'", "%27")
+                cells.append(f"<td><a class='results-link' href='{safe_href}' target='_blank'>{label}</a></td>")
+            elif col == "Summary":
+                cells.append(f"<td><div class='results-summary'>{val}</div></td>")
+            else:
+                cells.append(f"<td>{val}</td>")
+        rows_html.append("<tr>" + "".join(cells) + "</tr>")
+
+    table_html = f"""
+    <div class='results-shell'>
+      <div class='results-table-wrap'>
+        <table class='results-table'>
+          <thead>
+            <tr>{''.join(f'<th>{h}</th>' for h in headers)}</tr>
+          </thead>
+          <tbody>
+            {''.join(rows_html)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+def _render_search_summary(task_spec: dict):
+    geo = task_spec.get("geography", {}) or {}
+    requested = [_human_attr(x) for x in (task_spec.get("target_attributes") or []) if str(x).strip()]
+    items = [
+        ("Type", _human_task(task_spec.get("task_type", ""))),
+        ("Category", _human_category(task_spec.get("target_category", ""))),
+    ]
+    if _clean(task_spec.get("industry")):
+        items.append(("Focus", _clean(task_spec.get("industry"))))
+    inc = [str(x).title() for x in (geo.get("include_countries") or []) if str(x).strip()]
+    exc = [str(x).title() for x in (geo.get("exclude_countries") or []) if str(x).strip()]
+    excp = [str(x).title() for x in (geo.get("exclude_presence_countries") or []) if str(x).strip()]
+    if inc:
+        items.append(("Region", ", ".join(inc)))
+    if exc:
+        items.append(("Exclude HQ", ", ".join(exc)))
+    if excp:
+        items.append(("Exclude presence", ", ".join(excp)))
+    if requested:
+        items.append(("Requested info", ", ".join(requested)))
+
+    cards = "".join(
+        f"<div class='summary-item'><div class='summary-label'>{label}</div><div class='summary-value'>{value}</div></div>"
+        for label, value in items
+    )
+    st.markdown(
+        f"<div class='summary-card'><h3 style='margin:0 0 0.4rem 0;'>Search summary</h3><div class='summary-grid'>{cards}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
-if "coverage_value" not in st.session_state:
-    st.session_state.coverage_value = mode_defaults["Balanced"]
 if "mode_selected" not in st.session_state:
     st.session_state.mode_selected = "Balanced"
+if "coverage_value" not in st.session_state:
+    st.session_state.coverage_value = mode_defaults[st.session_state.mode_selected]
+
+
+def _set_mode(mode_name: str):
+    st.session_state.mode_selected = mode_name
+    st.session_state.coverage_value = mode_defaults[mode_name]
+
 
 with st.sidebar:
     st.markdown("## Search settings")
     st.caption("Choose a search mode and optional integrations.")
 
-    mode = st.radio(
-        "Search mode",
-        ["Fast", "Balanced", "Deep"],
-        index=["Fast", "Balanced", "Deep"].index(st.session_state.mode_selected),
-        horizontal=True,
-        help="Fast is quickest, Balanced is recommended, and Deep is best for more difficult or niche searches.",
-    )
-    if mode != st.session_state.mode_selected:
-        st.session_state.mode_selected = mode
-        st.session_state.coverage_value = mode_defaults[mode]
+    st.markdown("**Search mode**")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.button("Fast", use_container_width=True, type="primary" if st.session_state.mode_selected == "Fast" else "secondary", help="Quickest option for light discovery.", on_click=_set_mode, args=("Fast",))
+    with c2:
+        st.button("Balanced", use_container_width=True, type="primary" if st.session_state.mode_selected == "Balanced" else "secondary", help="Recommended for most searches.", on_click=_set_mode, args=("Balanced",))
+    with c3:
+        st.button("Deep", use_container_width=True, type="primary" if st.session_state.mode_selected == "Deep" else "secondary", help="Best for difficult or niche searches.", on_click=_set_mode, args=("Deep",))
 
+    mode = st.session_state.mode_selected
     search_coverage = st.slider(
         "Search coverage",
         min_value=5,
         max_value=80,
         value=int(st.session_state.coverage_value),
         step=5,
-        help="Increase this when you want to widen the search and retrieve more candidates.",
+        help="Widen the search by increasing how many results and candidates the app tries to retrieve.",
+        key="coverage_slider",
     )
     st.session_state.coverage_value = search_coverage
 
@@ -431,7 +656,7 @@ if run_btn:
         uploaded_df = _read_file(uploaded_file)
 
         progress_container = st.empty()
-        progress_bar = progress_container.progress(0, text="Searching... 0%")
+        progress_bar = progress_container.progress(5, text="Searching... 5%")
         progress_state = {"pct": 5}
 
         def _progress(msg: str):
@@ -457,7 +682,7 @@ if run_btn:
 result = st.session_state.get("last_result")
 if result:
     task_meta = result.get("task_spec", {}) or {}
-    records = result.get("records", []) or []
+    records = _filter_records_for_display(result.get("records", []) or [], task_meta)
 
     _render_search_summary(task_meta)
 
@@ -477,12 +702,7 @@ if result:
             summaries_tab = None
 
         with results_tab:
-            column_config = {}
-            if "Link" in display_df.columns:
-                column_config["Link"] = st.column_config.LinkColumn("Link")
-            if "LinkedIn" in display_df.columns:
-                column_config["LinkedIn"] = st.column_config.LinkColumn("LinkedIn")
-            st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=column_config)
+            _render_results_table(display_df)
 
             st.markdown('<div class="download-box">', unsafe_allow_html=True)
             st.markdown("### Download results")
