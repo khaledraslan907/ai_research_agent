@@ -235,7 +235,6 @@ class SearchOrchestrator:
 
         search_spec = self._task_to_search_spec(task_spec)
         records = score_records(records, search_spec)
-        records = self._postprocess_ranked_records(records, task_spec, min_confidence_score, logs)
         records.sort(key=lambda x: x.confidence_score, reverse=True)
 
         if llm_client.is_available() and records and task_spec.mode.lower() != "fast" and task_spec.task_type != "people_search":
@@ -249,8 +248,16 @@ class SearchOrchestrator:
 
         final_records: List[CompanyRecord] = []
         rejected_records: List[CompanyRecord] = list(verification.rejected)
+        cleaned_accepted: List[CompanyRecord] = []
         for rec in verification.accepted:
-            rec.description = self._best_display_summary(rec, task_spec)
+            if self._is_obvious_junk_record(rec, task_spec):
+                rec.notes = (rec.notes + " | rejected:junk_record").strip(" |")
+                rejected_records.append(rec)
+                continue
+            rec.summary = self._preferred_summary(rec, task_spec)
+            cleaned_accepted.append(rec)
+
+        for rec in cleaned_accepted:
             reason = self._get_reject_reason(rec, task_spec, 0)
             if reason:
                 rec.notes = (rec.notes + f" | rejected:{reason}").strip(" |")
@@ -786,86 +793,6 @@ class SearchOrchestrator:
         return records
 
     # ==================================================================
-    # Post-ranking cleanup
-    # ==================================================================
-
-    def _postprocess_ranked_records(
-        self,
-        records: List[CompanyRecord],
-        task_spec: TaskSpec,
-        min_confidence_score: int,
-        logs: List[str],
-    ) -> List[CompanyRecord]:
-        cleaned: List[CompanyRecord] = []
-        seen_keys: Set[str] = set()
-
-        for rec in records:
-            rec.description = self._best_display_summary(rec, task_spec)
-            if self._is_obvious_junk(rec, task_spec):
-                logs.append(f"Drop obvious junk: {rec.company_name[:60]}")
-                continue
-            if task_spec.task_type == "document_research" and not self._looks_like_academic_result(rec):
-                logs.append(f"Drop non-academic result: {rec.company_name[:60]}")
-                continue
-            if (task_spec.target_category or "").lower() == "service_company" and any(x in " ".join((task_spec.domain_keywords or [])).lower() for x in ["wireline", "slickline", "well logging"]):
-                if not self._looks_like_wireline_service(rec):
-                    logs.append(f"Drop non-wireline service result: {rec.company_name[:60]}")
-                    continue
-            if rec.confidence_score < max(5, min_confidence_score - 10) and task_spec.mode.lower() == "fast":
-                continue
-            key = (rec.domain or rec.website or rec.source_url or rec.company_name).lower().strip()
-            if key and key not in seen_keys:
-                seen_keys.add(key)
-                cleaned.append(rec)
-
-        return cleaned
-
-    def _best_display_summary(self, rec: CompanyRecord, task_spec: TaskSpec) -> str:
-        text = (rec.description or "").strip()
-        if not text:
-            return text
-        hay = text.lower()
-        focus_terms = [str(x).lower().strip() for x in ([task_spec.industry] + list(task_spec.domain_keywords or []) + list(task_spec.solution_keywords or [])) if str(x).strip()]
-        if any(j in hay for j in ["job opportunities", "apply today", "courier", "shipping services", "amazon.eg", "wuzzuf"]):
-            return ""
-        if task_spec.task_type == "document_research":
-            if not any(x in hay for x in ["abstract", "doi", "journal", "conference", "paper", "publication", "authors", "research", "study"]):
-                return ""
-        if focus_terms and not any(t in hay for t in focus_terms if len(t) >= 4):
-            # keep only if generic but useful company summary
-            if (task_spec.target_category or "").lower() == "service_company" and any(x in hay for x in ["wireline", "slickline", "well logging", "oilfield", "oil and gas"]):
-                return text[:420]
-            return text[:220] if len(text) < 220 else ""
-        return text[:420]
-
-    def _looks_like_academic_result(self, rec: CompanyRecord) -> bool:
-        hay = " ".join([rec.company_name or "", rec.description or "", rec.website or "", rec.source_url or "", rec.authors or "", rec.doi or ""]).lower()
-        if rec.doi or rec.authors or rec.publication_year:
-            return True
-        if rec.page_type == "document":
-            return True
-        if any(x in hay for x in ["onepetro", "doi", "journal", "conference", "paper", "publication", "abstract", "sciencedirect", "springer", "ieee", "researchgate"]):
-            return True
-        if any(x in hay for x in ["halliburton", "solutions", "services", "case study", "brochure"]):
-            return False
-        return False
-
-    def _looks_like_wireline_service(self, rec: CompanyRecord) -> bool:
-        hay = " ".join([rec.company_name or "", rec.description or "", rec.website or "", rec.source_url or ""]).lower()
-        if any(x in hay for x in ["courier", "shipping services", "ship services", "job opportunities", "recruitment"]):
-            return False
-        return any(x in hay for x in ["wireline", "slickline", "well logging", "open hole", "cased hole", "e-line", "electric line"])
-
-    def _is_obvious_junk(self, rec: CompanyRecord, task_spec: TaskSpec) -> bool:
-        hay = " ".join([rec.company_name or "", rec.description or "", rec.website or "", rec.source_url or ""]).lower()
-        junk = ["job opportunities", "apply today", "courier", "shipping services", "ship services", "amazon.eg", "wuzzuf", "business monthly"]
-        if any(x in hay for x in junk):
-            return True
-        if task_spec.task_type == "document_research" and any(x in hay for x in ["service company", "oil services", "product page", "solutions page"]):
-            return True
-        return False
-
-    # ==================================================================
     # Rejection logic
     # ==================================================================
 
@@ -980,6 +907,46 @@ class SearchOrchestrator:
                     return True
 
         return False
+
+
+    def _is_obvious_junk_record(self, rec: CompanyRecord, task_spec: TaskSpec) -> bool:
+        hay = " ".join([
+            rec.company_name or "", rec.description or "", rec.notes or "", rec.website or "", rec.source_url or "",
+            getattr(rec, "summary", "") or "", getattr(rec, "authors", "") or "", getattr(rec, "doi", "") or "",
+        ]).lower()
+        bad_terms = [
+            "courier", "shipping services", "job opportunities", "vacancy", "wuzzuf", "stock photo",
+            "list of companies", "directory", "ranking", "wikipedia", "amazon", "recruitment",
+        ]
+        if any(t in hay for t in bad_terms):
+            return True
+
+        if task_spec.task_type == "document_research":
+            academic_terms = ["abstract", "doi", "journal", "conference", "paper", "study", "authors"]
+            if not any(t in hay for t in academic_terms):
+                return True
+        return False
+
+    def _preferred_summary(self, rec: CompanyRecord, task_spec: TaskSpec) -> str:
+        text = " ".join([
+            rec.description or "", getattr(rec, "summary", "") or "", rec.notes or ""
+        ]).strip()
+        if not text:
+            return ""
+        hay = text.lower()
+        dks = [str(x).lower() for x in (getattr(task_spec, "domain_keywords", []) or [])]
+        focus = (getattr(task_spec, "industry", "") or "").lower()
+
+        if task_spec.task_type == "document_research":
+            if not any(x in hay for x in ["abstract", "paper", "study", "journal", "conference", "doi"]):
+                return ""
+        if any(x in dks for x in ["wireline", "slickline", "well logging"]):
+            if not any(x in hay for x in ["wireline", "slickline", "well logging", "logging"]):
+                return ""
+        if getattr(task_spec, "target_category", "") == "software_company" and focus == "oil and gas":
+            if not any(x in hay for x in ["software", "platform", "analytics", "automation", "digital", "monitoring", "scada", "ai"]):
+                return ""
+        return text[:500]
 
     # ==================================================================
     # Helpers
