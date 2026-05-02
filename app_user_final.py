@@ -27,7 +27,7 @@ st.set_page_config(
     page_title="Research Navigator",
     page_icon="🧭",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ── Global CSS ────────────────────────────────────────────────────────────────
@@ -38,6 +38,10 @@ st.markdown("""
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
 .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1180px; }
+
+/* Keep the sidebar control from visually fighting with the title area */
+button[kind="header"] { color: #9cc2ff !important; }
+[data-testid="collapsedControl"] { color: #9cc2ff !important; }
 
 /* ── Hero ── */
 .hero-wrap { display: flex; align-items: flex-start; justify-content: space-between;
@@ -146,6 +150,16 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .kg-free { display: inline-block; background: rgba(41,89,63,0.28); color: #7ec89a;
            border-radius: 6px; font-size: 0.66rem; font-weight: 600;
            padding: 0.06rem 0.32rem; margin-left: 0.3rem; vertical-align: middle; }
+.key-guide a {
+    color: #9cc2ff;
+    font-weight: 700;
+    text-decoration: none;
+    border-bottom: 1px dashed rgba(156,194,255,0.55);
+}
+.key-guide a:hover {
+    color: #ffffff;
+    border-bottom-color: #ffffff;
+}
 
 /* ── Key status ── */
 .key-status { color: #d7eadc; background: rgba(41,89,63,0.22); border: 1px solid rgba(91,166,116,0.18);
@@ -345,7 +359,7 @@ def _render_empty_state(task_type: str) -> None:
 
 
 def _summary_from_record(r: dict) -> str:
-    for key in ["summary", "description", "snippet", "notes"]:
+    for key in ["summary", "description", "snippet", "notes", "abstract"]:
         val = _clean(r.get(key))
         if val:
             return val
@@ -406,6 +420,20 @@ def _build_export_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _build_paper_summaries_df(records: list[dict]) -> pd.DataFrame:
+    rows = []
+    for r in records:
+        rows.append({
+            "Title": _clean(r.get("company_name")) or _clean(r.get("title")) or "Untitled",
+            "Link": _clean(r.get("website")) or _clean(r.get("source_url")),
+            "Authors": _clean(r.get("authors")),
+            "Year": _clean(r.get("publication_year")),
+            "DOI": _clean(r.get("doi")),
+            "Summary": _summary_from_record(r),
+        })
+    return pd.DataFrame(rows)
+
+
 def _to_excel_bytes(df: pd.DataFrame) -> bytes:
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
@@ -419,6 +447,15 @@ def _to_excel_bytes(df: pd.DataFrame) -> bytes:
                 if cell.value:
                     cell.hyperlink = str(cell.value)
                     cell.font = Font(color="0563C1", underline="single")
+
+        # Wider columns for readability.
+        for column_cells in ws.columns:
+            header = str(column_cells[0].value or "")
+            max_len = max(len(str(cell.value or "")) for cell in column_cells[:50])
+            if header.lower() == "summary":
+                ws.column_dimensions[column_cells[0].column_letter].width = 70
+            else:
+                ws.column_dimensions[column_cells[0].column_letter].width = min(max(max_len + 2, 12), 45)
     return out.getvalue()
 
 
@@ -529,7 +566,7 @@ with st.sidebar:
     # ── API Integrations ──────────────────────────────────────────────────────
     with st.expander("🔑 API integrations", expanded=False):
 
-        # Step-by-step key guide
+        # Step-by-step key guide with clickable provider links.
         st.markdown("""
 <div class="key-guide">
 
@@ -537,7 +574,7 @@ with st.sidebar:
   <div class="kg-name">Groq <span class="kg-free">FREE TIER</span></div>
   <div class="kg-role">🧠 LLM reasoning — smarter query interpretation &amp; scoring</div>
   <ul class="kg-steps">
-    <li><span class="sn">1.</span>Visit <strong>console.groq.com</strong> → sign up / log in</li>
+    <li><span class="sn">1.</span>Visit <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer">console.groq.com</a> → sign up / log in</li>
     <li><span class="sn">2.</span>Left menu → <strong>API Keys</strong> → <strong>Create API key</strong></li>
     <li><span class="sn">3.</span>Copy key and paste below</li>
   </ul>
@@ -545,9 +582,9 @@ with st.sidebar:
 
 <div class="kgp">
   <div class="kg-name">Gemini <span class="kg-free">FREE TIER</span></div>
-  <div class="kg-role">🧠 LLM reasoning — alternative to Groq (use either or both)</div>
+  <div class="kg-role">🧠 LLM reasoning — alternative to Groq</div>
   <ul class="kg-steps">
-    <li><span class="sn">1.</span>Visit <strong>aistudio.google.com</strong> → sign in with Google</li>
+    <li><span class="sn">1.</span>Visit <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer">aistudio.google.com</a> → sign in with Google</li>
     <li><span class="sn">2.</span>Click <strong>Get API key</strong> → <strong>Create API key</strong></li>
     <li><span class="sn">3.</span>Copy key and paste below</li>
   </ul>
@@ -557,7 +594,7 @@ with st.sidebar:
   <div class="kg-name">Exa</div>
   <div class="kg-role">🌐 Search engine — best for companies, papers &amp; LinkedIn</div>
   <ul class="kg-steps">
-    <li><span class="sn">1.</span>Visit <strong>exa.ai</strong> → sign up</li>
+    <li><span class="sn">1.</span>Visit <a href="https://exa.ai" target="_blank" rel="noopener noreferrer">exa.ai</a> → sign up</li>
     <li><span class="sn">2.</span>Dashboard → <strong>API keys</strong> → <strong>Create key</strong></li>
     <li><span class="sn">3.</span>Free credits included on signup</li>
   </ul>
@@ -567,7 +604,7 @@ with st.sidebar:
   <div class="kg-name">Tavily</div>
   <div class="kg-role">🌐 Search engine — strong for news &amp; recent content</div>
   <ul class="kg-steps">
-    <li><span class="sn">1.</span>Visit <strong>tavily.com</strong> → sign up</li>
+    <li><span class="sn">1.</span>Visit <a href="https://tavily.com" target="_blank" rel="noopener noreferrer">tavily.com</a> → sign up</li>
     <li><span class="sn">2.</span>Dashboard → <strong>API Keys</strong> → copy key</li>
     <li><span class="sn">3.</span>Free tier: 1,000 searches / month</li>
   </ul>
@@ -577,7 +614,7 @@ with st.sidebar:
   <div class="kg-name">SerpApi</div>
   <div class="kg-role">🌐 Search engine — Google results for broadest coverage</div>
   <ul class="kg-steps">
-    <li><span class="sn">1.</span>Visit <strong>serpapi.com</strong> → sign up</li>
+    <li><span class="sn">1.</span>Visit <a href="https://serpapi.com" target="_blank" rel="noopener noreferrer">serpapi.com</a> → sign up</li>
     <li><span class="sn">2.</span>Dashboard → copy <strong>Private API key</strong></li>
     <li><span class="sn">3.</span>Free plan: 100 searches / month</li>
   </ul>
@@ -892,11 +929,84 @@ if result:
 
         if summaries_tab is not None:
             with summaries_tab:
-                for _, row in export_df.iterrows():
-                    title   = _clean(row.get("name")) or "Untitled"
-                    summary = _clean(row.get("summary"))
+                summary_df = _build_paper_summaries_df(records)
+
+                st.markdown("### 📄 Paper summaries")
+                st.caption("Readable summaries with title, authors, year, DOI, source link, and summary text.")
+
+                for _, row in summary_df.iterrows():
+                    title = _clean(row.get("Title")) or "Untitled"
+                    link = _clean(row.get("Link"))
+                    authors = _clean(row.get("Authors"))
+                    year = _clean(row.get("Year"))
+                    doi = _clean(row.get("DOI"))
+                    summary = _clean(row.get("Summary"))
+
                     st.markdown(f"#### {title}")
+
+                    meta_parts = []
+                    if authors:
+                        meta_parts.append(f"**Authors:** {authors}")
+                    if year:
+                        meta_parts.append(f"**Year:** {year}")
+                    if doi:
+                        meta_parts.append(f"**DOI:** {doi}")
+
+                    if meta_parts:
+                        st.markdown(" | ".join(meta_parts))
+
+                    if link:
+                        st.markdown(f"[🔗 Open paper/source]({link})")
+
                     st.write(summary or "No summary available.")
                     st.divider()
+
+                st.markdown('<div class="download-box">', unsafe_allow_html=True)
+                st.markdown("### 📥 Download paper summaries")
+                st.caption("Exports are formatted for reading, not only spreadsheet viewing.")
+
+                s1, s2, s3 = st.columns(3)
+
+                summary_excel_bytes = _to_excel_bytes(summary_df)
+                summary_pdf_bytes = _to_pdf_bytes_vertical(
+                    summary_df,
+                    "Research Navigator — Paper Summaries",
+                )
+                summary_word_bytes, summary_word_ext = _to_word_bytes(
+                    summary_df,
+                    "Research Navigator — Paper Summaries",
+                )
+
+                with s1:
+                    st.download_button(
+                        "📊 Excel summaries",
+                        data=summary_excel_bytes,
+                        file_name=_normalize_filename("paper_summaries", ".xlsx"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        on_click="ignore",
+                    )
+
+                with s2:
+                    st.download_button(
+                        "📝 Word summaries",
+                        data=summary_word_bytes,
+                        file_name=_normalize_filename("paper_summaries", summary_word_ext),
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True,
+                        on_click="ignore",
+                    )
+
+                with s3:
+                    st.download_button(
+                        "📄 PDF summaries",
+                        data=summary_pdf_bytes,
+                        file_name=_normalize_filename("paper_summaries", ".pdf"),
+                        mime="application/pdf",
+                        use_container_width=True,
+                        on_click="ignore",
+                    )
+
+                st.markdown('</div>', unsafe_allow_html=True)
     else:
         _render_empty_state(task_meta.get("task_type", ""))
