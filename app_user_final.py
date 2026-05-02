@@ -538,6 +538,12 @@ for _k, _v in [
         st.session_state[_k] = _v
 
 
+def _on_mode_change() -> None:
+    """When the user changes Fast / Balanced / Deep, update coverage automatically."""
+    selected_mode = st.session_state.search_mode
+    st.session_state.coverage_slider = _MODE_DEFAULTS.get(selected_mode, 25)
+
+
 def _set_prompt(text: str) -> None:
     st.session_state["prompt_value"] = text
 
@@ -549,41 +555,32 @@ def _set_prompt(text: str) -> None:
 with st.sidebar:
     st.markdown("## ⚙️ Search settings")
 
-    # ── Mode settings inside a form ───────────────────────────────────────────
-    # Streamlit normally reruns the whole app every time a radio/slider changes.
-    # A form prevents that slow reload until the user clicks Apply settings.
-    with st.form("search_settings_form", border=False):
-        pending_mode = st.radio(
-            "Search mode",
-            ["Fast", "Balanced", "Deep"],
-            index=["Fast", "Balanced", "Deep"].index(st.session_state.search_mode),
-            horizontal=True,
-            help=(
-                "**Fast** — quickest, fewer sources.  "
-                "**Balanced** — recommended for most searches.  "
-                "**Deep** — best for niche or difficult topics."
-            ),
-        )
-
-        pending_coverage = st.slider(
-            "Search coverage",
-            min_value=5,
-            max_value=80,
-            value=int(st.session_state.coverage_slider),
-            step=5,
-            help="How many candidate results to scan before filtering. Higher = wider net, slower search.",
-        )
-
-        st.caption("Suggested coverage: Fast 15 · Balanced 25 · Deep 40")
-        apply_settings = st.form_submit_button("Apply settings", use_container_width=True)
-
-    if apply_settings:
-        st.session_state.search_mode = pending_mode
-        st.session_state.coverage_slider = int(pending_coverage)
-        st.toast(f"Applied: {pending_mode} mode, coverage {pending_coverage}")
-
+    # ── Mode (coverage auto-changes with mode) ───────────────────────────────
+    st.radio(
+        "Search mode",
+        ["Fast", "Balanced", "Deep"],
+        key="search_mode",
+        horizontal=True,
+        on_change=_on_mode_change,
+        help=(
+            "**Fast** — quickest, fewer sources.  "
+            "**Balanced** — recommended for most searches.  "
+            "**Deep** — best for niche or difficult topics."
+        ),
+    )
     mode = st.session_state.search_mode
+
+    st.slider(
+        "Search coverage",
+        min_value=5,
+        max_value=80,
+        step=5,
+        key="coverage_slider",
+        help="How many candidate results to scan before filtering. Higher = wider net, slower search.",
+    )
     search_coverage = int(st.session_state.coverage_slider)
+
+    st.caption("Suggested coverage: Fast 15 · Balanced 25 · Deep 40")
     st.caption(f"Active: **{mode}** mode · coverage **{search_coverage}**")
 
     st.divider()
