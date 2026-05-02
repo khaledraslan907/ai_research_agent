@@ -60,13 +60,51 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: rgba(15, 22, 38, 0.9);
     border: 1px solid rgba(124, 143, 179, 0.16);
     border-radius: 16px;
-    padding: 1rem 1.1rem;
+    padding: 1rem 1.1rem 0.85rem 1.1rem;
     margin-bottom: 1rem;
 }
+.summary-card-title {
+    color: #f8fafc;
+    font-weight: 700;
+    font-size: 1.05rem;
+    margin-bottom: 0.65rem;
+}
+/* ── chip grid: 2-per-row on a CSS grid ── */
+.chips-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem 0.5rem;
+    margin-bottom: 0.55rem;
+}
 .metric-chip {
-    display: inline-block; padding: 0.28rem 0.62rem; border-radius: 999px;
-    background: rgba(83, 113, 255, 0.14); border: 1px solid rgba(83, 113, 255, 0.22);
-    color: #dbe6ff; font-size: 0.82rem; margin: 0 0.45rem 0.45rem 0;
+    display: flex;
+    align-items: center;
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    background: rgba(83, 113, 255, 0.14);
+    border: 1px solid rgba(83, 113, 255, 0.22);
+    color: #dbe6ff;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.chip-label {
+    color: #8fa5d0;
+    font-weight: 500;
+    margin-right: 0.3em;
+    flex-shrink: 0;
+}
+.chip-value {
+    color: #e2ecff;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.summary-requested {
+    color: #7a8fa8;
+    font-size: 0.8rem;
+    margin-top: 0.3rem;
 }
 .key-status {
     color: #d7eadc; background: rgba(41, 89, 63, 0.22); border: 1px solid rgba(91, 166, 116, 0.18);
@@ -149,28 +187,59 @@ def _connected_integrations(keys: dict[str, str]) -> list[str]:
     return [labels[k] for k, v in keys.items() if str(v).strip()]
 
 
+def _chip(label: str, value: str) -> str:
+    """Return one chip HTML cell for the 2-column grid."""
+    return (
+        f'<div class="metric-chip">'
+        f'<span class="chip-label">{label}:</span>'
+        f'<span class="chip-value">{value}</span>'
+        f'</div>'
+    )
+
+
 def _render_search_summary(task_spec: dict):
     geo = task_spec.get("geography", {}) or {}
-    inc = [str(x).title() for x in (geo.get("include_countries") or []) if str(x).strip()]
-    exc = [str(x).title() for x in (geo.get("exclude_countries") or []) if str(x).strip()]
+    inc  = [str(x).title() for x in (geo.get("include_countries")         or []) if str(x).strip()]
+    exc  = [str(x).title() for x in (geo.get("exclude_countries")         or []) if str(x).strip()]
     excp = [str(x).title() for x in (geo.get("exclude_presence_countries") or []) if str(x).strip()]
 
-    st.markdown('<div class="summary-card">', unsafe_allow_html=True)
-    st.markdown("### Search summary")
-    st.markdown(f'<span class="metric-chip">Type: {_human_task(task_spec.get("task_type", ""))}</span>', unsafe_allow_html=True)
-    st.markdown(f'<span class="metric-chip">Category: {_human_category(task_spec.get("target_category", ""))}</span>', unsafe_allow_html=True)
+    # Build the list of (label, value) pairs
+    pairs: list[tuple[str, str]] = []
+    pairs.append(("Type",     _human_task(task_spec.get("task_type", ""))))
+    pairs.append(("Category", _human_category(task_spec.get("target_category", ""))))
     if _clean(task_spec.get("industry")):
-        st.markdown(f'<span class="metric-chip">Focus: {_clean(task_spec.get("industry"))}</span>', unsafe_allow_html=True)
+        pairs.append(("Focus",  _clean(task_spec.get("industry"))))
     if inc:
-        st.markdown(f'<span class="metric-chip">Region: {", ".join(inc)}</span>', unsafe_allow_html=True)
+        pairs.append(("Region", ", ".join(inc)))
     if exc:
-        st.markdown(f'<span class="metric-chip">Exclude HQ: {", ".join(exc)}</span>', unsafe_allow_html=True)
+        pairs.append(("Excl. HQ", ", ".join(exc)))
     if excp:
-        st.markdown(f'<span class="metric-chip">Exclude presence: {", ".join(excp)}</span>', unsafe_allow_html=True)
+        pairs.append(("Excl. presence", ", ".join(excp)))
+
+    # Pad to even number so the grid is always full
+    if len(pairs) % 2 != 0:
+        pairs.append(("", ""))   # empty filler cell
+
+    chips_html = "".join(
+        _chip(lbl, val) if lbl else '<div></div>'
+        for lbl, val in pairs
+    )
+
     requested = [str(x) for x in (task_spec.get("target_attributes") or []) if str(x).strip()]
+    req_html = ""
     if requested:
-        st.caption("Requested info: " + ", ".join(requested))
-    st.markdown('</div>', unsafe_allow_html=True)
+        req_html = f'<div class="summary-requested">Requested info: {", ".join(requested)}</div>'
+
+    st.markdown(
+        f"""
+        <div class="summary-card">
+          <div class="summary-card-title">Search summary</div>
+          <div class="chips-grid">{chips_html}</div>
+          {req_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _summary_from_record(r: dict) -> str:
@@ -188,29 +257,29 @@ def _build_display_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
     for r in records:
         if task_type == "document_research" or entity_type == "paper":
             rows.append({
-                "Title": _clean(r.get("company_name")) or _clean(r.get("title")),
-                "Link": _clean(r.get("website")) or _clean(r.get("source_url")),
+                "Title":   _clean(r.get("company_name")) or _clean(r.get("title")),
+                "Link":    _clean(r.get("website")) or _clean(r.get("source_url")),
                 "Authors": _clean(r.get("authors")),
-                "Year": _clean(r.get("publication_year")),
+                "Year":    _clean(r.get("publication_year")),
                 "Summary": _summary_from_record(r)[:320],
             })
         elif task_type == "people_search" or entity_type == "person":
             rows.append({
-                "Name": _clean(r.get("company_name")) or _clean(r.get("title")),
-                "Link": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")) or _clean(r.get("website")),
-                "Employer": _clean(r.get("employer_name")),
+                "Name":      _clean(r.get("company_name")) or _clean(r.get("title")),
+                "Link":      _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")) or _clean(r.get("website")),
+                "Employer":  _clean(r.get("employer_name")),
                 "Job title": _clean(r.get("job_title")),
-                "Location": _clean(r.get("city")) or _clean(r.get("country")),
-                "Summary": _summary_from_record(r)[:260],
+                "Location":  _clean(r.get("city")) or _clean(r.get("country")),
+                "Summary":   _summary_from_record(r)[:260],
             })
         else:
             rows.append({
-                "Name": _clean(r.get("company_name")) or _clean(r.get("title")),
-                "Link": _clean(r.get("website")) or _clean(r.get("source_url")),
-                "Email": _clean(r.get("email")),
-                "Phone": _clean(r.get("phone")),
+                "Name":     _clean(r.get("company_name")) or _clean(r.get("title")),
+                "Link":     _clean(r.get("website")) or _clean(r.get("source_url")),
+                "Email":    _clean(r.get("email")),
+                "Phone":    _clean(r.get("phone")),
                 "LinkedIn": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")),
-                "Summary": _summary_from_record(r)[:240],
+                "Summary":  _summary_from_record(r)[:240],
             })
     return pd.DataFrame(rows)
 
@@ -220,15 +289,15 @@ def _build_export_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
     task_type = task_meta.get("task_type", "")
     entity_type = (task_meta.get("target_entity_types") or [""])[0]
     for r in records:
-        link = _clean(r.get("website")) or _clean(r.get("source_url"))
+        link     = _clean(r.get("website")) or _clean(r.get("source_url"))
         linkedin = _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url"))
         if task_type == "people_search" or entity_type == "person":
             link = linkedin or link
         rows.append({
-            "name": _clean(r.get("company_name")) or _clean(r.get("title")),
-            "link": link,
-            "email": _clean(r.get("email")),
-            "phone": _clean(r.get("phone")),
+            "name":    _clean(r.get("company_name")) or _clean(r.get("title")),
+            "link":    link,
+            "email":   _clean(r.get("email")),
+            "phone":   _clean(r.get("phone")),
             "linkedin": linkedin,
             "summary": _summary_from_record(r),
         })
@@ -296,52 +365,64 @@ def _to_word_bytes(df: pd.DataFrame, title: str) -> tuple[bytes, str]:
     return "\n".join(lines).encode("utf-8"), ".doc"
 
 
-mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
-if "coverage_value" not in st.session_state:
-    st.session_state.coverage_value = mode_defaults["Balanced"]
-if "mode_selected" not in st.session_state:
-    st.session_state.mode_selected = "Balanced"
+# ── Session-state initialisation ────────────────────────────────────────────
+_MODE_DEFAULTS = {"Fast": 15, "Balanced": 25, "Deep": 40}
 
+if "search_mode" not in st.session_state:
+    st.session_state.search_mode = "Balanced"
+if "coverage_slider" not in st.session_state:
+    st.session_state.coverage_slider = _MODE_DEFAULTS["Balanced"]
+
+
+def _on_mode_change() -> None:
+    """Called by the radio widget's on_change; syncs the slider value."""
+    st.session_state.coverage_slider = _MODE_DEFAULTS[st.session_state.search_mode]
+
+
+# ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## Search settings")
     st.caption("Choose a search mode and optional integrations.")
 
-    mode = st.radio(
+    # FIX: use key= + on_change so a single click always registers correctly.
+    # The radio widget owns its state via key="search_mode"; on_change updates
+    # the slider key before the next render, so no second click is needed.
+    st.radio(
         "Search mode",
         ["Fast", "Balanced", "Deep"],
-        index=["Fast", "Balanced", "Deep"].index(st.session_state.mode_selected),
+        key="search_mode",
         horizontal=True,
-        help="Fast is quickest, Balanced is recommended, and Deep is best for more difficult or niche searches.",
+        on_change=_on_mode_change,
+        help="Fast is quickest, Balanced is recommended, Deep is best for niche searches.",
     )
-    if mode != st.session_state.mode_selected:
-        st.session_state.mode_selected = mode
-        st.session_state.coverage_value = mode_defaults[mode]
+    mode = st.session_state.search_mode   # read the authoritative value
 
-    search_coverage = st.slider(
+    # FIX: slider also uses a key so on_change can update it programmatically.
+    st.slider(
         "Search coverage",
         min_value=5,
         max_value=80,
-        value=int(st.session_state.coverage_value),
         step=5,
-        help="Increase this when you want to widen the search and retrieve more candidates.",
+        key="coverage_slider",
+        help="Increase to widen the search and retrieve more candidates.",
     )
-    st.session_state.coverage_value = search_coverage
+    search_coverage = st.session_state.coverage_slider   # read authoritative value
 
     with st.expander("Optional integrations", expanded=False):
         st.markdown("**Optional keys for stronger search quality**")
-        st.caption("Recommended setup: Groq or Gemini for interpretation, plus Exa or Tavily for broader coverage.")
+        st.caption("Recommended: Groq or Gemini for interpretation, plus Exa or Tavily for broader coverage.")
 
-        groq_key = st.text_input("Groq API key", value="", type="password")
-        gemini_key = st.text_input("Gemini API key", value="", type="password")
-        exa_key = st.text_input("Exa API key", value="", type="password")
-        tavily_key = st.text_input("Tavily API key", value="", type="password")
-        serpapi_key = st.text_input("SerpApi key", value="", type="password")
+        groq_key    = st.text_input("Groq API key",    value="", type="password")
+        gemini_key  = st.text_input("Gemini API key",  value="", type="password")
+        exa_key     = st.text_input("Exa API key",     value="", type="password")
+        tavily_key  = st.text_input("Tavily API key",  value="", type="password")
+        serpapi_key = st.text_input("SerpApi key",     value="", type="password")
 
         connected = _connected_integrations({
-            "groq": groq_key or _secret("GROQ_API_KEY"),
-            "gemini": gemini_key or _secret("GEMINI_API_KEY"),
-            "exa": exa_key or _secret("EXA_API_KEY"),
-            "tavily": tavily_key or _secret("TAVILY_API_KEY"),
+            "groq":    groq_key    or _secret("GROQ_API_KEY"),
+            "gemini":  gemini_key  or _secret("GEMINI_API_KEY"),
+            "exa":     exa_key     or _secret("EXA_API_KEY"),
+            "tavily":  tavily_key  or _secret("TAVILY_API_KEY"),
             "serpapi": serpapi_key or _secret("SERPAPI_KEY"),
         })
         if connected:
@@ -365,14 +446,20 @@ with st.sidebar:
         uploaded_file = st.file_uploader("Existing list for deduplication", type=["csv", "xlsx"])
         use_seed_dedupe = st.checkbox("Use uploaded file for deduplication", value=True)
 
+# ── Main page ────────────────────────────────────────────────────────────────
 st.markdown('<div class="hero-title">Research Navigator</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, and exhibitors in English or Arabic.</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, '
+    'and exhibitors in English or Arabic.</div>',
+    unsafe_allow_html=True,
+)
 
 st.markdown(
     """
 <div class="info-strip">
   <div class="info-strip-title">Optional integrations can improve search quality</div>
-  <div class="info-strip-text">For broader coverage and stronger interpretation, add Groq, Gemini, Exa, Tavily, or SerpApi from the <strong>Optional integrations</strong> section in the sidebar.</div>
+  <div class="info-strip-text">For broader coverage and stronger interpretation, add Groq, Gemini,
+  Exa, Tavily, or SerpApi from the <strong>Optional integrations</strong> section in the sidebar.</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -399,11 +486,11 @@ if run_btn:
     st.session_state["prompt_value"] = prompt
     if prompt.strip():
         user_keys = {
-            "groq_api_key": groq_key or _secret("GROQ_API_KEY"),
-            "gemini_api_key": gemini_key or _secret("GEMINI_API_KEY"),
-            "exa_api_key": exa_key or _secret("EXA_API_KEY"),
-            "tavily_api_key": tavily_key or _secret("TAVILY_API_KEY"),
-            "serpapi_key": serpapi_key or _secret("SERPAPI_KEY"),
+            "groq_api_key":   groq_key    or _secret("GROQ_API_KEY"),
+            "gemini_api_key": gemini_key  or _secret("GEMINI_API_KEY"),
+            "exa_api_key":    exa_key     or _secret("EXA_API_KEY"),
+            "tavily_api_key": tavily_key  or _secret("TAVILY_API_KEY"),
+            "serpapi_key":    serpapi_key or _secret("SERPAPI_KEY"),
         }
 
         llm_client = FreeLLMClient(
@@ -450,14 +537,14 @@ if run_btn:
         progress_bar.progress(100, text="Searching... 100%")
         progress_container.empty()
 
-        st.session_state["last_result"] = result
-        st.session_state["last_mode"] = mode
+        st.session_state["last_result"]   = result
+        st.session_state["last_mode"]     = mode
         st.session_state["last_coverage"] = search_coverage
 
 result = st.session_state.get("last_result")
 if result:
     task_meta = result.get("task_spec", {}) or {}
-    records = result.get("records", []) or []
+    records   = result.get("records", [])  or []
 
     _render_search_summary(task_meta)
 
@@ -467,13 +554,16 @@ if result:
 
     if records:
         display_df = _build_display_df(records, task_meta)
-        export_df = _build_export_df(records, task_meta)
+        export_df  = _build_export_df(records, task_meta)
 
-        is_papers = task_meta.get("task_type") == "document_research" or (task_meta.get("target_entity_types") or [""])[0] == "paper"
+        is_papers = (
+            task_meta.get("task_type") == "document_research"
+            or (task_meta.get("target_entity_types") or [""])[0] == "paper"
+        )
         if is_papers:
             results_tab, summaries_tab = st.tabs(["Results", "Paper summaries"])
         else:
-            results_tab = st.container()
+            results_tab  = st.container()
             summaries_tab = None
 
         with results_tab:
@@ -489,7 +579,7 @@ if result:
             st.caption("Exports include only the main highlights: name, link, email, phone, LinkedIn, and summary.")
             c1, c2, c3 = st.columns(3)
             excel_bytes = _to_excel_bytes(export_df)
-            pdf_bytes = _to_pdf_bytes_vertical(export_df, f"Research Navigator - {_human_task(task_meta.get('task_type', ''))}")
+            pdf_bytes   = _to_pdf_bytes_vertical(export_df, f"Research Navigator - {_human_task(task_meta.get('task_type', ''))}")
             word_bytes, word_ext = _to_word_bytes(export_df, f"Research Navigator - {_human_task(task_meta.get('task_type', ''))}")
             with c1:
                 st.download_button(
@@ -523,7 +613,7 @@ if result:
         if summaries_tab is not None:
             with summaries_tab:
                 for _, row in export_df.iterrows():
-                    title = _clean(row.get("name")) or "Untitled"
+                    title   = _clean(row.get("name")) or "Untitled"
                     summary = _clean(row.get("summary"))
                     st.markdown(f"#### {title}")
                     st.write(summary or "No summary available.")
@@ -531,5 +621,8 @@ if result:
     else:
         st.markdown('<div class="empty-box">', unsafe_allow_html=True)
         st.markdown("### No strong matches found yet")
-        st.markdown("Try switching to **Balanced** mode, broadening the request slightly, or adding optional integrations for wider coverage.")
+        st.markdown(
+            "Try switching to **Balanced** mode, broadening the request slightly, "
+            "or adding optional integrations for wider coverage."
+        )
         st.markdown('</div>', unsafe_allow_html=True)
