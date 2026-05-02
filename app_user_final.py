@@ -1,23 +1,25 @@
 from __future__ import annotations
 
+import io
 import os
-import re
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import cm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 from core.free_llm_client import FreeLLMClient
 from core.llm_task_parser import parse_task_prompt_llm_first
 from core.models import ProviderSettings
 from pipeline.orchestrator import SearchOrchestrator
+
+try:
+    from docx import Document  # type: ignore
+except Exception:
+    Document = None
 
 
 st.set_page_config(
@@ -33,14 +35,14 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(180deg, #070b14 0%, #0b1020 100%); color: #e7ecf5; }
-.block-container { padding-top: 2.4rem; padding-bottom: 2rem; max-width: 1180px; }
-.hero-title { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.035em; color: #f8fafc; margin-bottom: 0.18rem; line-height: 1.1; }
-.hero-subtitle { color: #b3bfd4; font-size: 0.98rem; margin-bottom: 0.95rem; line-height: 1.45; max-width: 860px; }
+.block-container { padding-top: 2rem; padding-bottom: 2rem; max-width: 1180px; }
+.hero-title { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.03em; color: #f8fafc; margin-bottom: 0.2rem; }
+.hero-subtitle { color: #b3bfd4; font-size: 1.02rem; margin-bottom: 1rem; line-height: 1.45; }
 .search-shell {
     background: rgba(15, 22, 38, 0.92);
     border: 1px solid rgba(124, 143, 179, 0.18);
     border-radius: 20px;
-    padding: 1.05rem 1.05rem 0.95rem 1.05rem;
+    padding: 1rem 1rem 0.95rem 1rem;
     box-shadow: 0 18px 44px rgba(0,0,0,0.28);
     margin-bottom: 1rem;
 }
@@ -65,41 +67,29 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: rgba(83, 113, 255, 0.14); border: 1px solid rgba(83, 113, 255, 0.22);
     color: #dbe6ff; font-size: 0.82rem; margin: 0 0.45rem 0.45rem 0;
 }
-.result-card {
-    background: rgba(15, 22, 38, 0.88);
-    border: 1px solid rgba(124, 143, 179, 0.16);
-    border-radius: 16px;
-    padding: 1rem 1.05rem;
-    margin-bottom: 0.85rem;
+.key-status {
+    color: #d7eadc; background: rgba(41, 89, 63, 0.22); border: 1px solid rgba(91, 166, 116, 0.18);
+    border-radius: 12px; padding: 0.55rem 0.75rem; font-size: 0.88rem; margin-top: 0.6rem;
 }
 .empty-box {
     background: rgba(15, 22, 38, 0.88);
     border: 1px dashed rgba(124, 143, 179, 0.22);
     border-radius: 16px; padding: 1.25rem; color: #c4cede;
 }
-.key-status {
-    color: #d7eadc; background: rgba(41, 89, 63, 0.22); border: 1px solid rgba(91, 166, 116, 0.18);
-    border-radius: 12px; padding: 0.55rem 0.75rem; font-size: 0.88rem; margin-top: 0.6rem;
-}
-.summary-box {
-    background: rgba(15, 22, 38, 0.88);
+.download-box {
+    background: rgba(15, 22, 38, 0.9);
     border: 1px solid rgba(124, 143, 179, 0.16);
     border-radius: 16px;
-    padding: 1rem 1.05rem;
-    margin-bottom: 0.85rem;
+    padding: 1rem 1rem 0.8rem 1rem;
+    margin-top: 1rem;
 }
-.summary-title { color: #f8fafc; font-weight: 700; margin-bottom: 0.45rem; }
-.summary-text { color: #d8dfeb; line-height: 1.6; }
-.stButton > button { border-radius: 12px; }
+.stButton > button, .stDownloadButton > button { border-radius: 12px; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
 def _secret(key: str, default: str = "") -> str:
     try:
         return st.secrets.get(key, "") or os.getenv(key, default)
@@ -107,19 +97,20 @@ def _secret(key: str, default: str = "") -> str:
         return os.getenv(key, default)
 
 
-def _normalize_filename(name: str) -> str:
-    base = (name or "results").strip() or "results"
-    for ext in [".xlsx", ".csv", ".json", ".pdf", ".docx", ".doc"]:
-        if base.lower().endswith(ext):
-            return base[: -len(ext)]
-    return base
-
-
 def _clean(v: Any) -> str:
     if v is None:
         return ""
     s = str(v).strip()
     return "" if s.lower() in {"nan", "none", "null"} else s
+
+
+def _normalize_filename(name: str, ext: str) -> str:
+    base = (name or "results").strip() or "results"
+    for e in [".xlsx", ".csv", ".json", ".pdf", ".docx", ".doc"]:
+        if base.lower().endswith(e):
+            base = base[: -len(e)]
+            break
+    return f"{base}{ext}"
 
 
 def _human_task(task_type: str) -> str:
@@ -152,6 +143,11 @@ def _read_file(file) -> pd.DataFrame | None:
         return None
 
 
+def _connected_integrations(keys: dict[str, str]) -> list[str]:
+    labels = {"groq": "Groq", "gemini": "Gemini", "exa": "Exa", "tavily": "Tavily", "serpapi": "SerpApi"}
+    return [labels[k] for k, v in keys.items() if str(v).strip()]
+
+
 def _render_search_summary(task_spec: dict):
     geo = task_spec.get("geography", {}) or {}
     inc = [str(x).title() for x in (geo.get("include_countries") or []) if str(x).strip()]
@@ -170,182 +166,149 @@ def _render_search_summary(task_spec: dict):
         st.markdown(f'<span class="metric-chip">Exclude HQ: {", ".join(exc)}</span>', unsafe_allow_html=True)
     if excp:
         st.markdown(f'<span class="metric-chip">Exclude presence: {", ".join(excp)}</span>', unsafe_allow_html=True)
+    requested = [str(x) for x in (task_spec.get("target_attributes") or []) if str(x).strip()]
+    if requested:
+        st.caption("Requested info: " + ", ".join(requested))
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-def _long_summary(record: dict) -> str:
+def _summary_from_record(r: dict) -> str:
     for key in ["summary", "description", "snippet", "notes"]:
-        text = _clean(record.get(key))
-        if text:
-            return re.sub(r"\s+", " ", text).strip()
+        val = _clean(r.get(key))
+        if val:
+            return val
     return ""
 
 
-def _paper_short_summary(record: dict) -> str:
-    text = _long_summary(record)
-    if not text:
-        return "No summary available."
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    brief = " ".join(sentences[:2]).strip()
-    if len(brief) < 80:
-        brief = text[:500].strip()
-    return brief
-
-
-def _records_to_display_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
+def _build_display_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
     task_type = task_meta.get("task_type", "")
     entity_type = (task_meta.get("target_entity_types") or [""])[0]
 
-    if task_type == "document_research" or entity_type == "paper":
-        rows = []
-        for r in records:
-            rows.append(
-                {
-                    "Title": _clean(r.get("company_name")) or _clean(r.get("title")),
-                    "Authors": _clean(r.get("authors")),
-                    "Year": _clean(r.get("publication_year")),
-                    "DOI": _clean(r.get("doi")),
-                    "Link": _clean(r.get("website")) or _clean(r.get("source_url")),
-                    "Summary": _paper_short_summary(r),
-                }
-            )
-        return pd.DataFrame(rows)
-
-    if task_type == "people_search" or entity_type == "person":
-        rows = []
-        for r in records:
-            rows.append(
-                {
-                    "Name": _clean(r.get("company_name")) or _clean(r.get("title")),
-                    "Link": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")) or _clean(r.get("website")),
-                    "Email": _clean(r.get("email")),
-                    "Phone": _clean(r.get("phone")),
-                    "LinkedIn": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")),
-                    "Summary": _long_summary(r)[:350],
-                }
-            )
-        return pd.DataFrame(rows)
-
     rows = []
     for r in records:
-        rows.append(
-            {
-                "Name": _clean(r.get("company_name")) or _clean(r.get("title")),
+        row = {
+            "Name": _clean(r.get("company_name")) or _clean(r.get("title")),
+            "Link": _clean(r.get("website")) or _clean(r.get("source_url")),
+            "Email": _clean(r.get("email")),
+            "Phone": _clean(r.get("phone")),
+            "LinkedIn": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")),
+            "Summary": _summary_from_record(r)[:300],
+        }
+        if task_type == "document_research" or entity_type == "paper":
+            row = {
+                "Title": _clean(r.get("company_name")) or _clean(r.get("title")),
                 "Link": _clean(r.get("website")) or _clean(r.get("source_url")),
-                "Email": _clean(r.get("email")),
-                "Phone": _clean(r.get("phone")),
-                "LinkedIn": _clean(r.get("linkedin_url")) or _clean(r.get("linkedin_profile")),
-                "Summary": _long_summary(r)[:350],
+                "Authors": _clean(r.get("authors")),
+                "Year": _clean(r.get("publication_year")),
+                "Summary": _summary_from_record(r)[:350],
             }
-        )
+        elif task_type == "people_search" or entity_type == "person":
+            row = {
+                "Name": _clean(r.get("company_name")) or _clean(r.get("title")),
+                "Link": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")) or _clean(r.get("website")),
+                "Employer": _clean(r.get("employer_name")),
+                "Job title": _clean(r.get("job_title")),
+                "Location": _clean(r.get("city")) or _clean(r.get("country")),
+                "Summary": _summary_from_record(r)[:300],
+            }
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _build_export_df(records: list[dict], task_meta: dict) -> pd.DataFrame:
+    rows = []
+    task_type = task_meta.get("task_type", "")
+    entity_type = (task_meta.get("target_entity_types") or [""])[0]
+    for r in records:
+        if task_type == "document_research" or entity_type == "paper":
+            rows.append({
+                "name": _clean(r.get("company_name")) or _clean(r.get("title")),
+                "link": _clean(r.get("website")) or _clean(r.get("source_url")),
+                "email": "",
+                "phone": "",
+                "linkedin": "",
+                "summary": _summary_from_record(r),
+            })
+        elif task_type == "people_search" or entity_type == "person":
+            rows.append({
+                "name": _clean(r.get("company_name")) or _clean(r.get("title")),
+                "link": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")) or _clean(r.get("website")),
+                "email": _clean(r.get("email")),
+                "phone": _clean(r.get("phone")),
+                "linkedin": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")),
+                "summary": _summary_from_record(r),
+            })
+        else:
+            rows.append({
+                "name": _clean(r.get("company_name")) or _clean(r.get("title")),
+                "link": _clean(r.get("website")) or _clean(r.get("source_url")),
+                "email": _clean(r.get("email")),
+                "phone": _clean(r.get("phone")),
+                "linkedin": _clean(r.get("linkedin_profile")) or _clean(r.get("linkedin_url")),
+                "summary": _summary_from_record(r),
+            })
     return pd.DataFrame(rows)
 
 
 def _to_excel_bytes(df: pd.DataFrame) -> bytes:
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Results")
-    return buffer.getvalue()
-
-
-def _to_word_bytes(df: pd.DataFrame, title: str) -> tuple[bytes, str, str]:
-    try:
-        from docx import Document  # type: ignore
-
-        doc = Document()
-        doc.add_heading(title, level=1)
-        table = doc.add_table(rows=1, cols=len(df.columns))
-        table.style = "Table Grid"
-        for i, col in enumerate(df.columns):
-            table.rows[0].cells[i].text = str(col)
-        for _, row in df.fillna("").iterrows():
-            cells = table.add_row().cells
-            for i, col in enumerate(df.columns):
-                cells[i].text = str(row[col])[:1200]
-        out = BytesIO()
-        doc.save(out)
-        return out.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
-    except Exception:
-        html = [f"<html><body><h1>{title}</h1><table border='1' cellspacing='0' cellpadding='4'>"]
-        html.append("<tr>" + "".join(f"<th>{c}</th>" for c in df.columns) + "</tr>")
-        for _, row in df.fillna("").iterrows():
-            html.append("<tr>" + "".join(f"<td>{str(row[c])}</td>" for c in df.columns) + "</tr>")
-        html.append("</table></body></html>")
-        return "".join(html).encode("utf-8"), "application/msword", ".doc"
+    return out.getvalue()
 
 
 def _to_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=0.6 * cm, leftMargin=0.6 * cm, topMargin=0.6 * cm, bottomMargin=0.6 * cm)
+    out = io.BytesIO()
+    doc = SimpleDocTemplate(out, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
-    elements = [Paragraph(title, styles["Title"]), Spacer(1, 0.3 * cm)]
-
-    pdf_df = df.fillna("").copy()
-    for col in pdf_df.columns:
-        pdf_df[col] = pdf_df[col].astype(str).map(lambda x: (x[:180] + "…") if len(x) > 180 else x)
-
-    data = [list(pdf_df.columns)] + pdf_df.values.tolist()
-    table = Table(data, repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2a3f73")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 8),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#b9c4d8")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f5fb")]),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
-    elements.append(table)
-    doc.build(elements)
-    return buffer.getvalue()
+    story = [Paragraph(title, styles["Title"]), Spacer(1, 12)]
+    for _, row in df.iterrows():
+        lines = []
+        for col, val in row.items():
+            text = _clean(val)
+            if text:
+                safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                lines.append(f"<b>{col}:</b> {safe}")
+        if lines:
+            story.append(Paragraph("<br/>".join(lines), styles["BodyText"]))
+            story.append(Spacer(1, 12))
+    doc.build(story)
+    return out.getvalue()
 
 
-def _render_downloads(df: pd.DataFrame, title: str, base_name: str):
-    st.markdown("### Downloads")
-    c1, c2, c3 = st.columns(3)
+def _to_word_bytes(df: pd.DataFrame, title: str) -> tuple[bytes, str]:
+    if Document is not None:
+        doc = Document()
+        doc.add_heading(title, level=1)
+        for _, row in df.iterrows():
+            for col, val in row.items():
+                text = _clean(val)
+                if text:
+                    p = doc.add_paragraph()
+                    p.add_run(f"{col}: ").bold = True
+                    p.add_run(text)
+            doc.add_paragraph("")
+        out = io.BytesIO()
+        doc.save(out)
+        return out.getvalue(), ".docx"
 
-    excel_bytes = _to_excel_bytes(df)
-    word_bytes, word_mime, word_ext = _to_word_bytes(df, title)
-    pdf_bytes = _to_pdf_bytes(df, title)
-
-    with c1:
-        st.download_button(
-            "Download Excel",
-            data=excel_bytes,
-            file_name=f"{base_name}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with c2:
-        st.download_button(
-            "Download Word",
-            data=word_bytes,
-            file_name=f"{base_name}{word_ext}",
-            mime=word_mime,
-            use_container_width=True,
-        )
-    with c3:
-        st.download_button(
-            "Download PDF",
-            data=pdf_bytes,
-            file_name=f"{base_name}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
+    html = [f"<html><body><h1>{title}</h1>"]
+    for _, row in df.iterrows():
+        html.append("<p>")
+        for col, val in row.items():
+            text = _clean(val)
+            if text:
+                html.append(f"<b>{col}:</b> {text}<br/>")
+        html.append("</p>")
+    html.append("</body></html>")
+    return "".join(html).encode("utf-8"), ".doc"
 
 
-# -----------------------------------------------------------------------------
-# Sidebar
-# -----------------------------------------------------------------------------
 mode_defaults = {"Fast": 15, "Balanced": 25, "Deep": 40}
+if "coverage_value" not in st.session_state:
+    st.session_state.coverage_value = mode_defaults["Balanced"]
+if "mode_selected" not in st.session_state:
+    st.session_state.mode_selected = "Balanced"
 
 with st.sidebar:
     st.markdown("## Search settings")
@@ -354,18 +317,23 @@ with st.sidebar:
     mode = st.radio(
         "Search mode",
         ["Fast", "Balanced", "Deep"],
-        index=1,
+        index=["Fast", "Balanced", "Deep"].index(st.session_state.mode_selected),
         horizontal=True,
-        help="Fast is quickest, Balanced is recommended, and Deep is best for more difficult or niche searches.",
+        help="Choose the search depth.",
     )
+    if mode != st.session_state.mode_selected:
+        st.session_state.mode_selected = mode
+        st.session_state.coverage_value = mode_defaults[mode]
+
     search_coverage = st.slider(
         "Search coverage",
-        5,
-        100,
-        mode_defaults[mode],
-        5,
-        help="Increase this to widen the search.",
+        min_value=5,
+        max_value=80,
+        value=int(st.session_state.coverage_value),
+        step=5,
+        help="Increase this when you want to widen the search and retrieve more candidates.",
     )
+    st.session_state.coverage_value = search_coverage
 
     with st.expander("Optional integrations", expanded=False):
         st.markdown("**Optional keys for stronger search quality**")
@@ -377,17 +345,13 @@ with st.sidebar:
         tavily_key = st.text_input("Tavily API key", value="", type="password")
         serpapi_key = st.text_input("SerpApi key", value="", type="password")
 
-        connected = [
-            label
-            for label, val in {
-                "Groq": groq_key or _secret("GROQ_API_KEY"),
-                "Gemini": gemini_key or _secret("GEMINI_API_KEY"),
-                "Exa": exa_key or _secret("EXA_API_KEY"),
-                "Tavily": tavily_key or _secret("TAVILY_API_KEY"),
-                "SerpApi": serpapi_key or _secret("SERPAPI_KEY"),
-            }.items()
-            if str(val).strip()
-        ]
+        connected = _connected_integrations({
+            "groq": groq_key or _secret("GROQ_API_KEY"),
+            "gemini": gemini_key or _secret("GEMINI_API_KEY"),
+            "exa": exa_key or _secret("EXA_API_KEY"),
+            "tavily": tavily_key or _secret("TAVILY_API_KEY"),
+            "serpapi": serpapi_key or _secret("SERPAPI_KEY"),
+        })
         if connected:
             st.markdown(f"<div class='key-status'>Connected: {', '.join(connected)}</div>", unsafe_allow_html=True)
 
@@ -412,15 +376,10 @@ Create an account → open your dashboard → copy the API key → paste it here
             )
 
     with st.expander("Advanced settings", expanded=False):
-        export_filename = st.text_input("Base filename", value="results")
         min_confidence = st.slider("Minimum relevance", 0, 100, 25 if mode == "Fast" else 35, 5)
         uploaded_file = st.file_uploader("Existing list for deduplication", type=["csv", "xlsx"])
         use_seed_dedupe = st.checkbox("Use uploaded file for deduplication", value=True)
 
-
-# -----------------------------------------------------------------------------
-# Header
-# -----------------------------------------------------------------------------
 st.markdown('<div class="hero-title">Research Navigator</div>', unsafe_allow_html=True)
 st.markdown('<div class="hero-subtitle">Search companies, academic papers, LinkedIn accounts, tenders, and exhibitors in English or Arabic.</div>', unsafe_allow_html=True)
 
@@ -451,74 +410,57 @@ prompt = st.text_area(
 run_btn = st.button("Start search", type="primary", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-
-# -----------------------------------------------------------------------------
-# Run search
-# -----------------------------------------------------------------------------
 if run_btn:
-    if not prompt.strip():
-        st.stop()
-
     st.session_state["prompt_value"] = prompt
+    if prompt.strip():
+        user_keys = {
+            "groq_api_key": groq_key or _secret("GROQ_API_KEY"),
+            "gemini_api_key": gemini_key or _secret("GEMINI_API_KEY"),
+            "exa_api_key": exa_key or _secret("EXA_API_KEY"),
+            "tavily_api_key": tavily_key or _secret("TAVILY_API_KEY"),
+            "serpapi_key": serpapi_key or _secret("SERPAPI_KEY"),
+        }
 
-    user_keys = {
-        "groq_api_key": groq_key or _secret("GROQ_API_KEY"),
-        "gemini_api_key": gemini_key or _secret("GEMINI_API_KEY"),
-        "exa_api_key": exa_key or _secret("EXA_API_KEY"),
-        "tavily_api_key": tavily_key or _secret("TAVILY_API_KEY"),
-        "serpapi_key": serpapi_key or _secret("SERPAPI_KEY"),
-    }
+        llm_client = FreeLLMClient(
+            groq_api_key=user_keys["groq_api_key"],
+            gemini_api_key=user_keys["gemini_api_key"],
+        )
 
-    llm_client = FreeLLMClient(
-        groq_api_key=user_keys["groq_api_key"],
-        gemini_api_key=user_keys["gemini_api_key"],
-    )
+        progress_slot = st.empty()
+        progress_slot.info("Searching...")
+        with st.spinner("Searching..."):
+            task_spec = parse_task_prompt_llm_first(prompt, llm=llm_client)
+            task_spec.mode = mode
+            task_spec.max_results = int(search_coverage)
+            if not task_spec.target_attributes:
+                task_spec.target_attributes = ["website"]
 
-    with st.spinner("Understanding your request..."):
-        task_spec = parse_task_prompt_llm_first(prompt, llm=llm_client)
+            provider_settings = ProviderSettings(
+                use_ddg=True,
+                use_exa=bool(user_keys["exa_api_key"]),
+                use_tavily=bool(user_keys["tavily_api_key"]),
+                use_serpapi=bool(user_keys["serpapi_key"]),
+                use_firecrawl=False,
+                use_llm_parser=bool(llm_client.available_backends()),
+                use_uploaded_seed_dedupe=use_seed_dedupe,
+            )
+            uploaded_df = _read_file(uploaded_file)
 
-    task_spec.mode = mode
-    task_spec.max_results = int(search_coverage)
-    task_spec.output.filename = _normalize_filename(export_filename)
-    if not task_spec.target_attributes:
-        task_spec.target_attributes = ["website"]
+            result = SearchOrchestrator().run_task(
+                task_spec=task_spec,
+                provider_settings=provider_settings,
+                uploaded_df=uploaded_df,
+                budget_overrides={},
+                min_confidence_score=int(min_confidence),
+                user_keys=user_keys,
+                progress_callback=lambda msg: progress_slot.info(msg or "Searching..."),
+            )
+        progress_slot.empty()
+        st.session_state["last_result"] = result
+        st.session_state["last_mode"] = mode
 
-    provider_settings = ProviderSettings(
-        use_ddg=True,
-        use_exa=bool(user_keys["exa_api_key"]),
-        use_tavily=bool(user_keys["tavily_api_key"]),
-        use_serpapi=bool(user_keys["serpapi_key"]),
-        use_firecrawl=False,
-        use_llm_parser=bool(llm_client.available_backends()),
-        use_uploaded_seed_dedupe=use_seed_dedupe,
-    )
-    uploaded_df = _read_file(uploaded_file)
-
-    progress_box = st.empty()
-    with progress_box.container():
-        st.info("Searching...")
-        bar = st.progress(5)
-
-    def _progress(msg: str):
-        nonlocal_bar = bar
-        try:
-            val = min(nonlocal_bar._value + 10, 90)  # type: ignore[attr-defined]
-        except Exception:
-            val = 35
-        nonlocal_bar.progress(val, text=msg)
-
-    result = SearchOrchestrator().run_task(
-        task_spec=task_spec,
-        provider_settings=provider_settings,
-        uploaded_df=uploaded_df,
-        budget_overrides={},
-        min_confidence_score=int(min_confidence),
-        user_keys=user_keys,
-        progress_callback=_progress,
-    )
-    bar.progress(100, text="Search complete")
-    progress_box.empty()
-
+result = st.session_state.get("last_result")
+if result:
     task_meta = result.get("task_spec", {}) or {}
     records = result.get("records", []) or []
     raw_total = int(result.get("raw_search_results", 0) or 0)
@@ -528,34 +470,75 @@ if run_btn:
     top1, top2, top3 = st.columns(3)
     top1.metric("Results", len(records))
     top2.metric("Raw matches", raw_total)
-    top3.metric("Mode", mode)
+    top3.metric("Mode", st.session_state.get("last_mode", mode))
 
     if records:
-        display_df = _records_to_display_df(records, task_meta)
-        entity_type = (task_meta.get("target_entity_types") or ["company"])[0]
-        is_papers = task_meta.get("task_type") == "document_research" or entity_type == "paper"
-        base_name = _normalize_filename(export_filename)
-        title = f"Research Navigator - {_human_task(task_meta.get('task_type', ''))}"
+        display_df = _build_display_df(records, task_meta)
+        export_df = _build_export_df(records, task_meta)
+
+        tabs = ["Results"]
+        is_papers = task_meta.get("task_type") == "document_research" or (task_meta.get("target_entity_types") or [""])[0] == "paper"
+        if is_papers:
+            tabs.append("Paper summaries")
+        tab_objs = st.tabs(tabs)
+
+        with tab_objs[0]:
+            column_config = {}
+            if "Link" in display_df.columns:
+                column_config["Link"] = st.column_config.LinkColumn("Link", display_text="Open")
+            if "LinkedIn" in display_df.columns:
+                column_config["LinkedIn"] = st.column_config.LinkColumn("LinkedIn", display_text="Open")
+            st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=column_config)
+
+            st.markdown('<div class="download-box">', unsafe_allow_html=True)
+            st.markdown("### Download results")
+            c1, c2, c3 = st.columns(3)
+
+            excel_bytes = _to_excel_bytes(export_df)
+            pdf_bytes = _to_pdf_bytes(export_df, f"Research Navigator - {_human_task(task_meta.get('task_type', ''))}")
+            word_bytes, word_ext = _to_word_bytes(export_df, f"Research Navigator - {_human_task(task_meta.get('task_type', ''))}")
+
+            with c1:
+                st.download_button(
+                    "Download Excel",
+                    data=excel_bytes,
+                    file_name=_normalize_filename("results", ".xlsx"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    on_click="ignore",
+                )
+            with c2:
+                st.download_button(
+                    "Download Word",
+                    data=word_bytes,
+                    file_name=_normalize_filename("results", word_ext),
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                    on_click="ignore",
+                )
+            with c3:
+                st.download_button(
+                    "Download PDF",
+                    data=pdf_bytes,
+                    file_name=_normalize_filename("results", ".pdf"),
+                    mime="application/pdf",
+                    use_container_width=True,
+                    on_click="ignore",
+                )
+            st.markdown('</div>', unsafe_allow_html=True)
 
         if is_papers:
-            tab_results, tab_summaries = st.tabs(["Results", "Paper summaries"])
-            with tab_results:
-                st.dataframe(display_df, use_container_width=True, height=520)
-                _render_downloads(display_df, title, base_name)
-            with tab_summaries:
-                for _, row in display_df.iterrows():
-                    st.markdown('<div class="summary-box">', unsafe_allow_html=True)
-                    st.markdown(f"<div class='summary-title'>{_clean(row.get('Title')) or 'Untitled paper'}</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div class='summary-text'>{_clean(row.get('Summary')) or 'No summary available.'}</div>", unsafe_allow_html=True)
-                    link = _clean(row.get("Link"))
-                    if link:
-                        st.markdown(f"<div style='margin-top:0.5rem;'><a href='{link}' target='_blank'>Open source</a></div>", unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-        else:
-            st.dataframe(display_df, use_container_width=True, height=520)
-            _render_downloads(display_df, title, base_name)
+            with tab_objs[1]:
+                for idx, rec in enumerate(records, 1):
+                    title = _clean(rec.get("company_name")) or _clean(rec.get("title")) or f"Paper {idx}"
+                    summary = _summary_from_record(rec)
+                    st.markdown(f"### {title}")
+                    if _clean(rec.get("authors")):
+                        st.caption(_clean(rec.get("authors")))
+                    st.write(summary or "No summary available.")
+                    st.divider()
     else:
         st.markdown('<div class="empty-box">', unsafe_allow_html=True)
         st.markdown("### No strong matches found yet")
-        st.markdown("Try switching to **Balanced** mode, broadening the request slightly, or increasing **Search coverage**.")
+        st.markdown("Try switching to **Balanced** mode, increasing **Search coverage**, or adding optional integrations for wider coverage.")
         st.markdown('</div>', unsafe_allow_html=True)
