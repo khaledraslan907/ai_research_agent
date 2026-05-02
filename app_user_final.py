@@ -614,8 +614,6 @@ with st.sidebar:
             st.markdown(f"<div class='key-status'>✓ Active: {', '.join(active)} + DuckDuckGo</div>", unsafe_allow_html=True)
         else:
             st.caption("Running on DuckDuckGo only. Add keys above for wider coverage.")
-    else:
-        groq_key = gemini_key = exa_key = tavily_key = serpapi_key = ""
 
     st.divider()
 
