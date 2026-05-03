@@ -25,7 +25,7 @@ except Exception:
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Research Agent",
-    page_icon="🧭",
+    page_icon="🔎",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -752,7 +752,7 @@ st.markdown("""
 
 # ── Quick-fill example chips ──────────────────────────────────────────────────
 _EXAMPLES: list[tuple[str, str]] = [
-    ("🏭 O&G companies",       "Find oil and gas service companies in Egypt with website and email."),
+    ("🛢️ O&G companies",       "Find oil and gas service companies in Egypt with website and email."),
     ("📄 ESP papers",           "Find academic papers about electrical submersible pumps with authors and abstract."),
     ("👤 LinkedIn engineers",   "Find LinkedIn profiles of petroleum engineers in Saudi Arabia."),
     ("🌍 Digital O&G vendors",  "Find digital software companies serving the oil and gas industry in the Middle East, excluding USA-headquartered firms."),
