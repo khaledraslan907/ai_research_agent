@@ -696,7 +696,7 @@ with st.sidebar:
     # Sidebar footer
     st.markdown(
         '<div class="sidebar-footer">'
-        '🧭 Research Navigator<br>'
+        '🧭 Research Agent<br>'
         'Tip: <strong>Balanced</strong> is best for most searches.<br>'
         'Add Groq + Exa for strongest results.'
         '</div>',
@@ -712,7 +712,7 @@ with st.sidebar:
 st.markdown(
     '<div class="hero-wrap">'
     '<div>'
-    '<div class="hero-title">🧭 Research Navigator</div>'
+    '<div class="hero-title">🧭 Research Agent</div>'
     '<div class="hero-subtitle">Find companies, papers, LinkedIn profiles &amp; more — describe your search in English or Arabic.</div>'
     '</div>'
     '<div class="hero-badge">⚡ AI-powered search agent</div>'
@@ -918,8 +918,8 @@ if result:
             c1, c2, c3 = st.columns(3)
             _label       = _human_task(task_meta.get("task_type", ""))
             excel_bytes  = _to_excel_bytes(export_df)
-            pdf_bytes    = _to_pdf_bytes_vertical(export_df, f"Research Navigator — {_label}")
-            word_bytes, word_ext = _to_word_bytes(export_df, f"Research Navigator — {_label}")
+            pdf_bytes    = _to_pdf_bytes_vertical(export_df, f"Research Agent — {_label}")
+            word_bytes, word_ext = _to_word_bytes(export_df, f"Research Agent — {_label}")
             with c1:
                 st.download_button(
                     "📊 Excel",
@@ -992,11 +992,11 @@ if result:
                 summary_excel_bytes = _to_excel_bytes(summary_df)
                 summary_pdf_bytes = _to_pdf_bytes_vertical(
                     summary_df,
-                    "Research Navigator — Paper Summaries",
+                    "Research Agent — Paper Summaries",
                 )
                 summary_word_bytes, summary_word_ext = _to_word_bytes(
                     summary_df,
-                    "Research Navigator — Paper Summaries",
+                    "Research Agent — Paper Summaries",
                 )
 
                 with s1:
