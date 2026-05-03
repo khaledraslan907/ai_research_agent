@@ -679,7 +679,7 @@ with st.sidebar:
     with st.expander("⚙️ Advanced settings", expanded=False):
         requested_fields = st.multiselect(
             "Requested fields",
-            ["website", "email", "phone", "linkedin", "summary", "hq_country", "presence_countries", "author", "doi"],
+            ["website", "email", "phone", "linkedin", "summary", "presence_countries", "author"],
             default=["website", "email", "phone"],
             help="Which details to prioritize retrieving.",
         )
