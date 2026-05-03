@@ -24,7 +24,7 @@ except Exception:
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Research Navigator",
+    page_title="Research Agent",
     page_icon="🧭",
     layout="wide",
     initial_sidebar_state="expanded",
