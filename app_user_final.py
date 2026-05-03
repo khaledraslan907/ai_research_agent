@@ -696,7 +696,7 @@ with st.sidebar:
     # Sidebar footer
     st.markdown(
         '<div class="sidebar-footer">'
-        '🧭 Research Agent<br>'
+        '🔎 Research Agent<br>'
         'Tip: <strong>Balanced</strong> is best for most searches.<br>'
         'Add Groq + Exa for strongest results.'
         '</div>',
@@ -712,7 +712,7 @@ with st.sidebar:
 st.markdown(
     '<div class="hero-wrap">'
     '<div>'
-    '<div class="hero-title">🧭 Research Agent</div>'
+    '<div class="hero-title">🔎 Research Agent</div>'
     '<div class="hero-subtitle">Find companies, papers, LinkedIn profiles &amp; more — describe your search in English or Arabic.</div>'
     '</div>'
     '<div class="hero-badge">⚡ AI-powered search agent</div>'
